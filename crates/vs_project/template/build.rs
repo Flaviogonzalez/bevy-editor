@@ -1,4 +1,4 @@
-//! Compiles the scripts in `assets/scripts` into `$OUT_DIR/scripts.rs`. With the `preview`
+//! Compiles the scripts in `assets/scripts`, and in its folders, into `$OUT_DIR/scripts.rs`. With the `preview`
 //! feature only their components are generated, and the `.lua` files drive them; otherwise the
 //! scripts become Rust systems. A script with errors fails the build, with the editor's messages.
 
@@ -18,16 +18,13 @@ fn main() {
     // doesn't have yet, which is why it's being written. Their errors are warnings then.
     let catalog_only = std::env::var_os(vs_graph::components::CATALOG_ENV).is_some();
     println!("cargo::rerun-if-env-changed={}", vs_graph::components::CATALOG_ENV);
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .map(|dir| dir.filter_map(|e| e.ok().map(|e| e.path())).collect())
-        .unwrap_or_default();
-    files.retain(|p: &std::path::PathBuf| p.extension().is_some_and(|e| e == "lua"));
-    files.sort();
+    // Subfolders too: each folder is a plugin of the scripts in it.
+    let files = vs_graph::script_files(&dir);
 
     let mut lowered = Vec::new();
     for file in &files {
         println!("cargo::rerun-if-changed={}", file.display());
-        let path = format!("scripts/{}", file.file_name().unwrap().to_string_lossy());
+        let path = format!("scripts/{}", vs_graph::script_name(&dir, file));
         let source = std::fs::read_to_string(file).unwrap();
         let graph = vs_graph::load_from_str(source.trim_start_matches('\u{feff}'))
             .unwrap_or_else(|e| panic!("{path}: {e}"));

@@ -1,6 +1,6 @@
 //! Writes the differential test's scripts into `assets/scripts`: hand-built ones (`demo.lua`,
 //! `logic.lua`, `math.lua`, `components.lua`, `input.lua`, `despawn.lua`, `stats.lua`,
-//! `charged.lua`, `watcher.lua`) and `coverage.lua`,
+//! `charged.lua`, `watch/watcher.lua`) and `coverage.lua`,
 //! built from the node catalog so it uses every pure node.
 //!
 //! They're normal visual scripts: open them in the editor to change them.
@@ -31,7 +31,8 @@ fn main() {
     // `charged.lua` uses what `stats.lua` declares: learn it from the file just written.
     vs_graph::components::load_project(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
     write("charged.lua", &charged());
-    write("watcher.lua", &watcher());
+    // In a folder, so the folder's plugin and the import of `Stats` from two levels down are built.
+    write("watch/watcher.lua", &watcher());
 }
 
 /// Only reads what other scripts write, so the ambiguity test sees conflicts beyond
@@ -184,6 +185,7 @@ fn write(name: &str, g: &Graph) {
     let compiled = vs_graph::compile(g);
     assert!(compiled.problems.is_empty(), "{name}: {:?}", compiled.problems);
     let path = format!("{}/assets/scripts/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
     std::fs::write(&path, vs_graph::save_to_string(g)).unwrap();
     println!("wrote {path}");
 }

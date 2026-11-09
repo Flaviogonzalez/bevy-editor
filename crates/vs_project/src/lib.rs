@@ -155,13 +155,14 @@ impl Project {
         self.root.join("assets").join("scripts")
     }
 
+    /// The project's scripts, in folders too, sorted by their path in [`Self::scripts_dir`].
     pub fn scripts(&self) -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(self.scripts_dir())
-            .map(|dir| dir.filter_map(|e| e.ok().map(|e| e.path())).collect())
-            .unwrap_or_default();
-        files.retain(|p| p.extension().is_some_and(|e| e == "lua"));
-        files.sort();
-        files
+        vs_graph::script_files(&self.scripts_dir())
+    }
+
+    /// A script's path in [`Self::scripts_dir`]: `player/jump.lua`.
+    pub fn script_name(&self, file: &Path) -> String {
+        vs_graph::script_name(&self.scripts_dir(), file)
     }
 
     /// Adds an empty script. Its component is named after it (`door` → `Door`).
@@ -212,7 +213,7 @@ impl Project {
         let mut out = Vec::new();
         let mut errors = Vec::new();
         for file in self.scripts() {
-            let path = format!("scripts/{}", file.file_name().unwrap().to_string_lossy());
+            let path = format!("scripts/{}", self.script_name(&file));
             let source = std::fs::read_to_string(&file)?;
             let graph = vs_graph::load_from_str(source.trim_start_matches('\u{feff}'))
                 .with_context(|| format!("reading {path}"))?;
@@ -408,6 +409,12 @@ mod tests {
         assert_eq!(project.scripts().len(), 1);
         project.new_script("Door").unwrap();
         assert!(project.new_script("door").is_err());
+        // A script in a folder: the folder is a plugin, in its own module.
+        let jump = project.scripts_dir().join("player").join("jump.lua");
+        std::fs::create_dir_all(jump.parent().unwrap()).unwrap();
+        std::fs::write(&jump, vs_graph::save_to_string(&vs_graph::starter())).unwrap();
+        assert_eq!(project.script_name(&jump), "player/jump.lua");
+        assert_eq!(project.scripts().len(), 3);
         assert_eq!(dir.join(".target"), project.target_dir());
 
         let out = project.export_dir();
@@ -425,7 +432,25 @@ mod tests {
         }
         walk(&out, &out, &mut files);
         files.sort();
-        assert_eq!(files, [".gitignore", "Cargo.lock", "Cargo.toml", "src/main.rs", "src/scripts/door.rs", "src/scripts/mod.rs", "src/scripts/spinner.rs"]);
+        assert_eq!(
+            files,
+            [
+                ".gitignore",
+                "Cargo.lock",
+                "Cargo.toml",
+                "src/main.rs",
+                "src/scripts/door.rs",
+                "src/scripts/mod.rs",
+                "src/scripts/player/jump.rs",
+                "src/scripts/player/mod.rs",
+                "src/scripts/spinner.rs",
+            ]
+        );
+        let root = std::fs::read_to_string(out.join("src/scripts/mod.rs")).unwrap();
+        assert!(root.contains("mod player;") && root.contains("pub use player::jump::Jump;"), "{root}");
+        assert!(root.contains("player::PlayerPlugin"), "{root}");
+        let folder = std::fs::read_to_string(out.join("src/scripts/player/mod.rs")).unwrap();
+        assert!(folder.contains("pub mod jump;") && folder.contains("app.add_plugins(jump::JumpPlugin)"), "{folder}");
         for file in &files {
             if file == "Cargo.lock" {
                 continue;

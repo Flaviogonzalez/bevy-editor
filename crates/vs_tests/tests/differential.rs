@@ -12,12 +12,21 @@ use bevy::time::TimeUpdateStrategy;
 use vs_tests::Wobble;
 use vs_bevy::{LuaScript, VisualScript};
 
+#[allow(unused_imports)] // Not every component is spawned here.
 mod native {
     include!(concat!(env!("OUT_DIR"), "/scripts_native.rs"));
 }
 
+#[allow(unused_imports)] // Not every component is spawned here.
 mod preview {
     include!(concat!(env!("OUT_DIR"), "/scripts_preview.rs"));
+}
+
+/// The scripts as an exported project has them (a file per script, a folder per folder), each
+/// file inlined where its `mod` is (see `build.rs`).
+#[allow(unused_imports)] // Not every component is spawned here.
+mod export {
+    include!(concat!(env!("OUT_DIR"), "/scripts_export.rs"));
 }
 
 const SEEDS: u64 = 25;
@@ -256,12 +265,7 @@ fn predicted_ambiguities_match_bevy() {
     // The same scripts, lowered as `build.rs` does.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     vs_graph::components::load_project(root).unwrap();
-    let mut files: Vec<_> = std::fs::read_dir(root.join("assets/scripts"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|e| e == "lua"))
-        .collect();
-    files.sort();
+    let files = vs_graph::script_files(&root.join("assets/scripts"));
     let names: Vec<_> = files.iter().map(|f| vs_graph::rust::names(&f.to_string_lossy())).collect();
     let scripts: Vec<Vec<vs_graph::access::System>> = files
         .iter()
@@ -280,12 +284,36 @@ fn predicted_ambiguities_match_bevy() {
     reported.sort();
     predicted.sort();
     assert_eq!(predicted, reported);
-    // Several scripts move their entity, and `watcher.lua` reads a declared component and a game
-    // component that others write, so the rule is checked beyond `Transform`.
+    // Several scripts move their entity, and `watch/watcher.lua` reads a declared component and a
+    // game component that others write, so the rule is checked beyond `Transform`. Bevy seeing
+    // its systems also shows that `WatchPlugin`, its folder's plugin, added them.
     let on = |c: &str| reported.iter().filter(|(_, _, cs)| cs.iter().any(|x| x == c)).count();
     assert!(on("Transform") > 10, "{reported:?}");
     assert!(reported.contains(&pair("charged::update_charged".into(), "watcher::setup_watcher".into(), vec!["Stats".into()])));
     assert!(reported.contains(&pair("components::update_components".into(), "watcher::update_watcher".into(), vec!["Wobble".into()])));
+}
+
+/// The exported modules compile (this file wouldn't otherwise), and their plugin adds the same
+/// systems as the build's, folders included.
+#[test]
+fn exported_scripts_add_the_same_systems() {
+    fn systems(plugin: impl Plugin) -> Vec<String> {
+        let mut app = base_app();
+        app.add_plugins(plugin);
+        let world = app.world_mut();
+        let mut schedule = world.resource_mut::<Schedules>().remove(Update).unwrap();
+        schedule.initialize(world).unwrap();
+        let mut names: Vec<String> = schedule
+            .systems()
+            .unwrap()
+            .map(|(_, s)| s.name().to_string().rsplit("::").take(2).collect::<Vec<_>>().join("<"))
+            .collect();
+        names.sort();
+        names
+    }
+    let exported = systems(export::ScriptsPlugin);
+    assert!(exported.iter().any(|n| n == "setup_watcher<watcher"), "{exported:?}");
+    assert_eq!(exported, systems(native::ScriptsPlugin));
 }
 
 /// Small deterministic generator, so a failing seed reproduces.

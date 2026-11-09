@@ -8,6 +8,11 @@
 //!
 //! Two layouts: [`emit_dev`] writes one file for a game's `build.rs` (in preview mode only the
 //! components, driven by Lua), and [`emit_export`] writes `src/scripts/` for an exported project.
+//!
+//! A folder of scripts (`assets/scripts/player/`) becomes a module, `player`, whose plugin
+//! `PlayerPlugin` adds the plugins of the scripts and folders in it; `ScriptsPlugin` adds those
+//! at the top. Every component is re-exported at the root, so the game names `scripts::Jump`
+//! wherever `jump.lua` is, and its type name must be unique in the project.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -132,27 +137,151 @@ fn format_file(tokens: TokenStream) -> String {
     prettyplease::unparse(&file)
 }
 
-/// One file for `include!` from a game's `build.rs`: a module per script, `pub use` of each
-/// component, and a `ScriptsPlugin` that sets them all up.
-pub fn emit_dev(scripts: &[Script], mode: Mode) -> String {
-    let modules = scripts.iter().map(|s| {
-        let names = names(&s.path);
-        let m = format_ident!("{}", names.module);
-        let items = script_items(s, &names, mode == Mode::Native);
-        quote! {
-            #[allow(dead_code, unused_imports)]
-            pub mod #m { #items }
+/// A folder of scripts: a module whose plugin adds the plugins of the scripts and folders in it.
+/// The root is the scripts folder itself, whose plugin is `ScriptsPlugin`.
+struct Folder<'s, 'a> {
+    /// The module's name (`player`); empty for the root.
+    module: String,
+    /// `PlayerPlugin`.
+    plugin: String,
+    scripts: Vec<&'s Script<'a>>,
+    folders: Vec<Folder<'s, 'a>>,
+}
+
+/// The folders a script is in, as module names: `scripts/player/input/jump.lua` → `player`,
+/// `input`.
+fn folders(path: &str) -> Vec<String> {
+    let rel = path.strip_prefix("scripts/").unwrap_or(path);
+    let mut parts: Vec<&str> = rel.split(['/', '\\']).collect();
+    parts.pop();
+    parts.into_iter().map(ident_name).collect()
+}
+
+/// `player` → `PlayerPlugin`.
+fn folder_plugin(module: &str) -> String {
+    let ty: String = module
+        .split('_')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let mut c = p.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
+        })
+        .collect();
+    format!("{ty}Plugin")
+}
+
+/// The folder tree of `scripts`, in their order.
+fn tree<'s, 'a>(scripts: &'s [Script<'a>]) -> Folder<'s, 'a> {
+    let mut root = Folder { module: String::new(), plugin: "ScriptsPlugin".into(), scripts: Vec::new(), folders: Vec::new() };
+    for script in scripts {
+        let mut folder = &mut root;
+        for module in folders(&script.path) {
+            let i = match folder.folders.iter().position(|f| f.module == module) {
+                Some(i) => i,
+                None => {
+                    let plugin = folder_plugin(&module);
+                    folder.folders.push(Folder { module, plugin, scripts: Vec::new(), folders: Vec::new() });
+                    folder.folders.len() - 1
+                }
+            };
+            folder = &mut folder.folders[i];
         }
+        folder.scripts.push(script);
+    }
+    root
+}
+
+/// Why the scripts at these paths inside `assets/scripts` (`player/jump.lua`) can't all have
+/// their own module, if they can't: two of them, or a script and a folder, would get the same
+/// module name in one folder (`jump.lua` and `Jump.lua`, `player.lua` and `player/`).
+pub fn module_clash(paths: &[String]) -> Option<String> {
+    let mut owners: HashMap<Vec<String>, String> = HashMap::new();
+    let mut claim = |module: Vec<String>, what: String| match owners.get(&module) {
+        Some(first) if *first != what => {
+            Some(format!("{first} and {what} would both be the module `{}`. Rename one", module.join("::")))
+        }
+        Some(_) => None,
+        None => {
+            owners.insert(module, what);
+            None
+        }
+    };
+    for path in paths {
+        let full = format!("scripts/{path}");
+        let dirs = folders(&full);
+        let raw: Vec<&str> = path.split('/').collect();
+        for depth in 1..=dirs.len() {
+            let what = format!("the folder `{}`", raw[..depth].join("/"));
+            if let Some(clash) = claim(dirs[..depth].to_vec(), what) {
+                return Some(clash);
+            }
+        }
+        let mut module = dirs;
+        module.push(names(&full).module);
+        if let Some(clash) = claim(module, format!("`{path}`")) {
+            return Some(clash);
+        }
+    }
+    None
+}
+
+/// The components scripts declare, by name.
+fn declared_names(scripts: &[Script]) -> BTreeSet<String> {
+    scripts.iter().flat_map(|s| s.ir.declares.iter().map(|d| d.name.clone())).collect()
+}
+
+/// The `use`s a script's module needs for the components other scripts declare: they're
+/// re-exported at the root of the scripts, so `use super::Stats;`, or `use super::super::Stats;`
+/// from a script in a folder.
+fn imports(script: &Script, declared: &BTreeSet<String>) -> TokenStream {
+    let up = "super::".repeat(folders(&script.path).len() + 1);
+    let uses = script
+        .ir
+        .components
+        .iter()
+        .filter(|c| declared.contains(&c.name) && !script.ir.declares.iter().any(|d| d.name == c.name))
+        .map(|c| {
+            let path: syn::Path = syn::parse_str(&format!("{up}{}", c.name)).expect("component names parse");
+            quote! { use #path; }
+        });
+    quote! { #(#uses)* }
+}
+
+/// A script's module path from the root of the scripts: `player::jump`.
+fn module_path(script: &Script) -> TokenStream {
+    let parts = folders(&script.path).into_iter().chain([names(&script.path).module]).map(|m| format_ident!("{m}"));
+    quote! { #(#parts)::* }
+}
+
+/// The plugins a folder's plugin adds: its scripts', then its folders'.
+fn child_plugins(folder: &Folder) -> Vec<TokenStream> {
+    let scripts = folder.scripts.iter().map(|s| {
+        let names = names(&s.path);
+        let (m, p) = (format_ident!("{}", names.module), format_ident!("{}", names.plugin));
+        quote!(#m::#p)
     });
+    let folders = folder.folders.iter().map(|f| {
+        let (m, p) = (format_ident!("{}", f.module), format_ident!("{}", f.plugin));
+        quote!(#m::#p)
+    });
+    scripts.chain(folders).collect()
+}
+
+/// One file for `include!` from a game's `build.rs`: a module per script and per folder, `pub
+/// use` of each component at the root, and a `ScriptsPlugin` that sets them all up.
+pub fn emit_dev(scripts: &[Script], mode: Mode) -> String {
+    let declared = declared_names(scripts);
+    let root = tree(scripts);
+    let modules = dev_modules(&root, mode, &declared);
     let reexports = reexports(scripts);
     let build = match mode {
-        Mode::Native => plugin_body(scripts),
+        Mode::Native => plugin_body(&child_plugins(&root)),
         Mode::Preview => {
             // Each script's Lua runs on the entities with its component. The Lua reaches declared
             // components through reflection, by the exact type registered here.
             let registrations = scripts.iter().map(|s| {
                 let names = names(&s.path);
-                let (m, ty, path) = (format_ident!("{}", names.module), format_ident!("{}", names.ty), &s.path);
+                let (m, ty, path) = (module_path(s), format_ident!("{}", names.ty), &s.path);
                 let own = (!s.ir.declares_only()).then(|| quote! { ::vs_bevy::preview::register::<#m::#ty>(app, #path); });
                 let declared = s.ir.declares.iter().map(|d| {
                     let (t, name) = (format_ident!("{}", d.name), &d.name);
@@ -173,7 +302,7 @@ pub fn emit_dev(scripts: &[Script], mode: Mode) -> String {
     };
     let tokens = quote! {
         use bevy::prelude::*;
-        #(#modules)*
+        #modules
         #reexports
         pub struct ScriptsPlugin;
         impl Plugin for ScriptsPlugin { #build }
@@ -181,13 +310,58 @@ pub fn emit_dev(scripts: &[Script], mode: Mode) -> String {
     format!("// @generated from assets/scripts. Don't edit: it's rewritten on every build.\n\n{}", format_file(tokens))
 }
 
+/// The modules inside `folder`, for [`emit_dev`]: one per script, and one per folder with the
+/// folder's plugin (only in native mode: in preview mode `ScriptsPlugin` registers everything).
+fn dev_modules(folder: &Folder, mode: Mode, declared: &BTreeSet<String>) -> TokenStream {
+    let scripts = folder.scripts.iter().map(|s| {
+        let names = names(&s.path);
+        let m = format_ident!("{}", names.module);
+        let items = script_items(s, &names, mode == Mode::Native, &imports(s, declared));
+        quote! {
+            #[allow(dead_code, unused_imports)]
+            pub mod #m { #items }
+        }
+    });
+    let folders = folder.folders.iter().map(|f| {
+        let m = format_ident!("{}", f.module);
+        let inner = dev_modules(f, mode, declared);
+        let plugin = (mode == Mode::Native).then(|| folder_plugin_items(f));
+        quote! {
+            #[allow(dead_code, unused_imports)]
+            pub mod #m {
+                use bevy::prelude::*;
+                #inner
+                #plugin
+            }
+        }
+    });
+    quote! { #(#scripts)* #(#folders)* }
+}
+
+/// A folder's plugin, which adds the plugins of what's in it.
+fn folder_plugin_items(folder: &Folder) -> TokenStream {
+    let p = format_ident!("{}", folder.plugin);
+    let build = plugin_body(&child_plugins(folder));
+    quote! {
+        pub struct #p;
+        impl Plugin for #p { #build }
+    }
+}
+
 /// The files of `src/scripts/` for an exported project, as (path relative to `src/`, source).
-/// They read as hand-written code and depend only on Bevy.
+/// A folder of scripts is a folder of modules with a `mod.rs` holding its plugin. They read as
+/// hand-written code and depend only on Bevy.
 pub fn emit_export(scripts: &[Script]) -> Vec<(String, String)> {
+    let declared = declared_names(scripts);
+    let root = tree(scripts);
     let mut files = Vec::new();
-    let mods = scripts.iter().map(|s| format_ident!("{}", names(&s.path).module));
+    let mods = root
+        .scripts
+        .iter()
+        .map(|s| format_ident!("{}", names(&s.path).module))
+        .chain(root.folders.iter().map(|f| format_ident!("{}", f.module)));
     let reexports = reexports(scripts);
-    let build = plugin_body(scripts);
+    let build = plugin_body(&child_plugins(&root));
     files.push((
         "scripts/mod.rs".to_string(),
         format_file(quote! {
@@ -198,18 +372,44 @@ pub fn emit_export(scripts: &[Script]) -> Vec<(String, String)> {
             impl Plugin for ScriptsPlugin { #build }
         }),
     ));
-    for s in scripts {
-        let names = names(&s.path);
-        files.push((format!("scripts/{}.rs", names.module), format_file(script_items(s, &names, true))));
-    }
+    export_folder(&root, "scripts", &declared, &mut files);
     files
 }
 
+/// The files of a folder's scripts and subfolders, under `dir` (`scripts/player`).
+fn export_folder(folder: &Folder, dir: &str, declared: &BTreeSet<String>, files: &mut Vec<(String, String)>) {
+    for s in &folder.scripts {
+        let names = names(&s.path);
+        let items = script_items(s, &names, true, &imports(s, declared));
+        files.push((format!("{dir}/{}.rs", names.module), format_file(items)));
+    }
+    for f in &folder.folders {
+        let sub = format!("{dir}/{}", f.module);
+        // `pub`, so the root's `pub use` can name what's inside.
+        let mods = f
+            .scripts
+            .iter()
+            .map(|s| format_ident!("{}", names(&s.path).module))
+            .chain(f.folders.iter().map(|f| format_ident!("{}", f.module)));
+        let plugin = folder_plugin_items(f);
+        files.push((
+            format!("{sub}/mod.rs"),
+            format_file(quote! {
+                use bevy::prelude::*;
+                #(pub mod #mods;)*
+                #plugin
+            }),
+        ));
+        export_folder(f, &sub, declared, files);
+    }
+}
+
 fn reexports(scripts: &[Script]) -> TokenStream {
-    // Declared components are reached from other script modules as `super::Name`.
+    // Every component is named at the root, wherever its script is: the game spawns
+    // `scripts::Spinner`, and scripts in other modules import declared components from here.
     let items = scripts.iter().map(|s| {
         let names = names(&s.path);
-        let (m, ty) = (format_ident!("{}", names.module), format_ident!("{}", names.ty));
+        let (m, ty) = (module_path(s), format_ident!("{}", names.ty));
         let own = (!s.ir.declares_only()).then(|| quote! { pub use #m::#ty; });
         let declared = s.ir.declares.iter().map(|d| {
             let t = format_ident!("{}", d.name);
@@ -220,15 +420,7 @@ fn reexports(scripts: &[Script]) -> TokenStream {
     quote! { #(#items)* }
 }
 
-fn plugin_body(scripts: &[Script]) -> TokenStream {
-    let plugins: Vec<TokenStream> = scripts
-        .iter()
-        .map(|s| {
-            let names = names(&s.path);
-            let (m, p) = (format_ident!("{}", names.module), format_ident!("{}", names.plugin));
-            quote!(#m::#p)
-        })
-        .collect();
+fn plugin_body(plugins: &[TokenStream]) -> TokenStream {
     match plugins.len() {
         0 => quote! { fn build(&self, _app: &mut App) {} },
         1 => quote! { fn build(&self, app: &mut App) { app.add_plugins(#(#plugins)*); } },
@@ -318,7 +510,7 @@ fn data_struct(ty: &syn::Ident, require: Option<TokenStream>, fields: &[(syn::Id
 
 /// The items of one script's module: the component, and with `systems` its plugin and one
 /// system per event.
-fn script_items(script: &Script, names: &Names, systems: bool) -> TokenStream {
+fn script_items(script: &Script, names: &Names, systems: bool, imports: &TokenStream) -> TokenStream {
     let ir = script.ir;
     let ty = format_ident!("{}", names.ty);
     let mut fields = Namer::default();
@@ -331,6 +523,7 @@ fn script_items(script: &Script, names: &Names, systems: bool) -> TokenStream {
     if !systems {
         return quote! {
             use bevy::prelude::*;
+            #imports
             #component
         };
     }
@@ -405,6 +598,7 @@ fn script_items(script: &Script, names: &Names, systems: bool) -> TokenStream {
     quote! {
         #condition_use
         use bevy::prelude::*;
+        #imports
 
         #component
 
@@ -920,6 +1114,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_script_and_a_folder_with_one_module_name_clash() {
+        let paths = |ps: &[&str]| ps.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        assert_eq!(module_clash(&paths(&["door.lua", "player/jump.lua", "player/run.lua", "enemy/jump.lua"])), None);
+        let clash = module_clash(&paths(&["player.lua", "player/jump.lua"])).unwrap();
+        assert!(clash.contains("`player.lua`") && clash.contains("the folder `player`"), "{clash}");
+        let clash = module_clash(&paths(&["My Door.lua", "my_door.lua"])).unwrap();
+        assert!(clash.contains("`my_door`"), "{clash}");
+    }
+
+    #[test]
     fn names_follow_the_file() {
         let n = names("scripts/door_logic.lua");
         assert_eq!((n.module.as_str(), n.ty.as_str(), n.plugin.as_str()), ("door_logic", "DoorLogic", "DoorLogicPlugin"));
@@ -975,7 +1179,8 @@ mod tests {
         assert!(lowered.problems.is_empty(), "{:?}", lowered.problems);
         assert!(!lowered.module.declares_only());
         let native = emit_dev(&[Script { path: "scripts/battery.lua".into(), ir: &lowered.module }], Mode::Native);
-        assert!(native.contains("#[require(super::Charge)]"), "{native}");
+        // Declared in this very module, so named as is, with no `use`.
+        assert!(native.contains("#[require(Charge)]") && !native.contains("use super::Charge"), "{native}");
         assert!(native.contains("pub struct Battery"), "{native}");
         assert!(native.contains("#[derive(Component, Reflect, Clone, Debug, Default)]"), "{native}");
         assert!(native.contains("pub use battery::Battery;\npub use battery::Charge;"), "{native}");

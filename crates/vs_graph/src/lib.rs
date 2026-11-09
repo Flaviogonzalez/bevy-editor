@@ -94,6 +94,32 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
+/// The visual scripts under `dir` (a project's `assets/scripts`), subfolders included, sorted by
+/// their path inside it. Each folder becomes a plugin of the scripts in it (see [`rust`]).
+pub fn script_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for path in entries.filter_map(|e| e.ok().map(|e| e.path())) {
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "lua") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, &mut files);
+    files.sort_by_key(|f| script_name(dir, f));
+    files
+}
+
+/// A script's path inside `dir`, with `/` between folders: `player/movement.lua`. Asset paths,
+/// error messages and the catalog name scripts this way.
+pub fn script_name(dir: &std::path::Path, file: &std::path::Path) -> String {
+    let rel = file.strip_prefix(dir).unwrap_or(file);
+    rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+}
+
 /// Reads the graph embedded in a script file.
 pub fn load_from_str(source: &str) -> Result<Graph, LoadError> {
     // Git on Windows may have checked the file out with CRLF line endings.

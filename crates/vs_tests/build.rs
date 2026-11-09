@@ -1,11 +1,12 @@
 //! Compiles the test scripts in `assets/scripts` both ways a project's `build.rs` does, into
 //! `$OUT_DIR/scripts_native.rs` (the scripts as Rust systems) and `$OUT_DIR/scripts_preview.rs`
 //! (only their components; Lua drives them). The differential test runs both side by side. It
+//! also writes them as an exported project would have them, in `$OUT_DIR/export/scripts/`. It
 //! follows the project template's `build.rs`, so it exercises the same path real projects take.
 
 use std::path::Path;
 
-use vs_graph::rust::{Mode, Script, emit_dev};
+use vs_graph::rust::{Mode, Script, emit_dev, emit_export};
 
 fn main() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scripts");
@@ -20,17 +21,13 @@ fn main() {
     let catalog_only = std::env::var_os(vs_graph::components::CATALOG_ENV).is_some();
     println!("cargo::rerun-if-env-changed={}", vs_graph::components::CATALOG_ENV);
 
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .expect("assets/scripts exists")
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|e| e == "lua"))
-        .collect();
-    files.sort();
+    // Subfolders too: each folder is a plugin of the scripts in it.
+    let files = vs_graph::script_files(&dir);
 
     let mut lowered = Vec::new();
     for file in &files {
         println!("cargo::rerun-if-changed={}", file.display());
-        let path = format!("scripts/{}", file.file_name().unwrap().to_string_lossy());
+        let path = format!("scripts/{}", vs_graph::script_name(&dir, file));
         let source = std::fs::read_to_string(file).unwrap();
         let graph = vs_graph::load_from_str(source.trim_start_matches('\u{feff}'))
             .unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -53,4 +50,33 @@ fn main() {
     let preview = emit_dev(&scripts, Mode::Preview);
     std::fs::write(out.join("scripts_native.rs"), &native).unwrap();
     std::fs::write(out.join("scripts_preview.rs"), &preview).unwrap();
+    // The exported project's `src/scripts/`, so a test compiles its modules too. `include!` can't
+    // follow `mod x;` to other files, so each is replaced by the file's contents: an inline
+    // module resolves paths exactly as a file module does.
+    let files = emit_export(&scripts);
+    std::fs::write(out.join("scripts_export.rs"), inline("scripts/mod.rs", &files)).unwrap();
+}
+
+/// The file at `path` among `files`, with each `mod x;` replaced by `mod x { … }` holding the
+/// file of that module.
+fn inline(path: &str, files: &[(String, String)]) -> String {
+    let dir = path.strip_suffix("mod.rs").unwrap_or(path);
+    let source = &files.iter().find(|(p, _)| p == path).unwrap_or_else(|| panic!("no {path}")).1;
+    let mut out = String::new();
+    for line in source.lines() {
+        let decl = line.trim().strip_suffix(';').and_then(|l| l.strip_prefix("pub mod ").or_else(|| l.strip_prefix("mod ")));
+        match decl {
+            Some(name) if !name.contains(' ') => {
+                let file = format!("{dir}{name}.rs");
+                let child = if files.iter().any(|(p, _)| *p == file) { file } else { format!("{dir}{name}/mod.rs") };
+                let vis = if line.trim().starts_with("pub ") { "pub " } else { "" };
+                out.push_str(&format!("{vis}mod {name} {{\n{}\n}}\n", inline(&child, files)));
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
 }

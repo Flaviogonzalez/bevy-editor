@@ -44,16 +44,29 @@ impl Editor {
         loaded
     }
 
+    /// The open script's path in the project's scripts folder (`player/jump.lua`), as the catalog
+    /// and messages name scripts; just its file name outside a project, or before it's saved.
+    pub fn script_name(&self) -> String {
+        match (&self.workspace.project, &self.doc.path) {
+            (Some(project), Some(path)) if path.starts_with(project.scripts_dir()) => project.script_name(path),
+            _ => self.doc.file_name(),
+        }
+    }
+
     /// Reads the systems of the project's scripts other than the open one, for
     /// [`Editor::ambiguities`]. Call it when the project, the open script or its name changes;
     /// the other scripts only change on disk when they're open, so that's enough.
     pub fn scan_systems(&mut self) {
-        let own = self.doc.file_name();
-        let scripts = self.workspace.project.as_ref().map(|p| p.scripts()).unwrap_or_default();
-        self.workspace.others = scripts
+        let own = self.script_name();
+        let Some(project) = &self.workspace.project else {
+            self.workspace.others.clear();
+            return;
+        };
+        self.workspace.others = project
+            .scripts()
             .into_iter()
             .filter_map(|path| {
-                let file = path.file_name()?.to_string_lossy().into_owned();
+                let file = project.script_name(&path);
                 if file == own {
                     return None;
                 }

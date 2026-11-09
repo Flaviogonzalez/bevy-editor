@@ -152,7 +152,7 @@ impl Editor {
                 });
             } else if def.is_copy() {
                 // Components other scripts declare. The open script's own come from its cards.
-                let file = self.doc.file_name();
+                let file = self.script_name();
                 for c in vs_graph::components::all() {
                     let Some(source) = &c.source else { continue };
                     if *source == file || self.doc.graph.defined_components().any(|d| d.name == c.name) {

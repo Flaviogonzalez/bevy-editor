@@ -12,7 +12,7 @@
 //!
 //! A field is named `Component.path`, such as `PointLight.intensity` or `Sprite.color`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -68,8 +68,8 @@ pub struct ComponentInfo {
     /// the game's own.
     pub rust_path: String,
     pub fields: Vec<FieldInfo>,
-    /// The script file that declares it, such as `stats.lua` in [`SCRIPTS_DIR`]; `None` for the
-    /// bundled and the game's own Rust components.
+    /// The script that declares it, by its path in [`SCRIPTS_DIR`] (`stats.lua`,
+    /// `player/stats.lua`); `None` for the bundled and the game's own Rust components.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
@@ -127,12 +127,13 @@ pub fn is_bundled(name: &str) -> bool {
     store().read().unwrap().bundled.iter().any(|c| c.name == name)
 }
 
-/// A declared component as the catalog lists it. Generated code names it through the `pub use`
-/// beside the script modules, which every script module can reach as `super::`.
+/// A declared component as the catalog lists it. Its Rust path is its bare name: the generated
+/// code re-exports it at the root of the scripts, and a script of another module imports it from
+/// there (see [`crate::rust`]).
 pub fn declared_info(def: &ComponentDef) -> ComponentInfo {
     ComponentInfo {
         name: def.name.clone(),
-        rust_path: format!("super::{}", def.name),
+        rust_path: def.name.clone(),
         fields: def
             .fields
             .iter()
@@ -187,11 +188,11 @@ pub fn load_project(root: &Path) -> Result<usize, String> {
 /// appear once: a script's own component (`health.lua` → `Health`, unless it only declares) and
 /// each declared one.
 fn scan_declared(dir: &Path) -> Result<Vec<ComponentInfo>, String> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
-        .unwrap_or_default();
-    files.retain(|p| p.extension().is_some_and(|e| e == "lua"));
-    files.sort();
+    let files = crate::script_files(dir);
+    let names: Vec<String> = files.iter().map(|f| crate::script_name(dir, f)).collect();
+    if let Some(clash) = crate::rust::module_clash(&names) {
+        return Err(clash);
+    }
     let mut out = Vec::new();
     // Each type name and what generates it, for the message on a clash.
     let mut owners: Vec<(String, String)> = Vec::new();
@@ -205,7 +206,7 @@ fn scan_declared(dir: &Path) -> Result<Vec<ComponentInfo>, String> {
     for file in &files {
         let Ok(source) = std::fs::read_to_string(file) else { continue };
         let Ok(graph) = crate::load_from_str(source.trim_start_matches('\u{feff}')) else { continue };
-        let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = crate::script_name(dir, file);
         let path = format!("scripts/{name}");
         if !graph.declares_only() {
             claim(crate::rust::names(&path).ty, format!("the component of {path}"))?;
@@ -246,6 +247,7 @@ pub fn field(field: &str) -> Option<(ComponentInfo, FieldInfo)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use crate::{Value, Variable};
 
     /// A fresh `assets/scripts`-like folder with the given scripts.
@@ -272,7 +274,7 @@ mod tests {
         let dir = scripts("declare", &[("health.lua", declaring("Health")), ("spinner.lua", crate::starter())]);
         let found = scan_declared(&dir).unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].rust_path, "super::Health");
+        assert_eq!(found[0].rust_path, "Health");
         assert_eq!(found[0].source.as_deref(), Some("health.lua"));
         let value = FieldInfo { path: "value".into(), ty: PinType::Number, default: Some(Value::Number(1.0)) };
         assert_eq!(found[0].fields, vec![value]);
