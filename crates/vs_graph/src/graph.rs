@@ -145,6 +145,10 @@ pub struct Node {
     /// moving, deleting, copying and undoing the card do the same to the definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component: Option<ComponentDef>,
+    /// The component a read-only copy shows: one declared in another script, drawn here so its
+    /// fields are in sight. The copy holds only the name; the fields come from the catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_of: Option<String>,
 }
 
 /// A component declared in a script: data only, a name and typed fields with their starting
@@ -240,7 +244,7 @@ impl Graph {
         let id = self.next_id;
         self.next_id += 1;
         let mut node =
-            Node { id, kind: kind.to_string(), x, y, values: BTreeMap::new(), var, field: None, name: None, component: None };
+            Node { id, kind: kind.to_string(), x, y, values: BTreeMap::new(), var, field: None, name: None, component: None, copy_of: None };
         let pins = self.pins_of(&node);
         for pin in pins.inputs {
             if let Some(value) = pin.default.clone().or_else(|| Value::default_for(pin.ty)) {
@@ -265,6 +269,7 @@ impl Graph {
             field: Some(field.to_string()),
             name: None,
             component: None,
+            copy_of: None,
         };
         for pin in self.pins_of(&node).inputs {
             if let Some(value) = pin.default.clone().or_else(|| Value::default_for(pin.ty)) {
@@ -279,6 +284,13 @@ impl Graph {
     pub fn add_component_def(&mut self, component: ComponentDef, x: f32, y: f32) -> NodeId {
         let id = self.add_node(library::DEFINE_COMPONENT, None, x, y);
         self.node_mut(id).expect("just added").component = Some(component);
+        id
+    }
+
+    /// Adds a read-only copy of `name`, a component another script declares.
+    pub fn add_component_copy(&mut self, name: &str, x: f32, y: f32) -> NodeId {
+        let id = self.add_node(library::COMPONENT_COPY, None, x, y);
+        self.node_mut(id).expect("just added").copy_of = Some(name.to_string());
         id
     }
 

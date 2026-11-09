@@ -48,6 +48,7 @@ impl Editor {
         let (title, subject) = match (node.var.as_ref().or(node.field.as_ref()), def) {
             // The card shows its name in its own field, under the header.
             (_, Some(d)) if d.is_definition() => (d.title.to_string(), None),
+            (_, Some(d)) if d.is_copy() => (d.title.to_string(), Some("read-only".to_string())),
             (subject, Some(d)) =>(d.title.to_string(), subject.cloned()),
             _ => (format!("? {}", node.kind), None),
         };
@@ -222,17 +223,25 @@ impl Editor {
                     .child(text),
             );
         }
-        if let Some(def) = &node.component {
+        let card = match (&node.component, &node.copy_of) {
+            (Some(def), _) => Some((def.clone(), None)),
+            (None, Some(name)) => Some(layout::copy_view(&self.doc.graph, name)),
+            (None, None) => None,
+        };
+        if let Some((def, source)) = card {
+            let view = CardView { def: &def, source: source.as_deref(), readonly: l.readonly };
             for (part, rect) in &l.parts {
-                el = el.child(self.card_part(node.id, def, *part, rect, l, cx));
+                el = el.child(self.card_part(node.id, &view, *part, rect, l, cx));
             }
         }
         el
     }
 
-    /// One clickable part of a component card, drawn like a node's inline fields: a boxed text
-    /// that shows the edit buffer while it has the keyboard.
-    fn card_part(&self, id: NodeId, def: &ComponentDef, part: CardPart, rect: &Rect, l: &NodeLayout, cx: &App) -> Div {
+    /// One part of a component card, drawn like a node's inline fields: a boxed text that shows
+    /// the edit buffer while it has the keyboard. On a read-only copy the texts aren't boxed,
+    /// since they can't be edited, and the link to the declaring script sits beside the name.
+    fn card_part(&self, id: NodeId, view: &CardView, part: CardPart, rect: &Rect, l: &NodeLayout, cx: &App) -> Div {
+        let def = view.def;
         let z = self.doc.zoom;
         let p = (rect.min - l.rect.min) * z;
         let hovered = self.canvas.hover == Hit::Card(id, part) && matches!(self.canvas.drag, Drag::None);
@@ -256,6 +265,9 @@ impl Editor {
             .whitespace_nowrap()
             .text_size(px(11.0 * z));
         let boxed = |d: Div| {
+            if view.readonly {
+                return d.px(px(5.0 * z)).gap(px(4.0 * z));
+            }
             d.px(px(5.0 * z))
                 .gap(px(4.0 * z))
                 .rounded(px(4.0 * z))
@@ -304,6 +316,19 @@ impl Editor {
                 .rounded(px(4.0 * z))
                 .text_color(if hovered { theme::error(cx) } else { theme::dim(cx) })
                 .child(Icon::new(IconName::Close).size(px(11.0 * z))),
+            CardPart::Source => {
+                let (label, color) = match view.source {
+                    Some(file) => (format!("defined in {file}"), theme::selection(cx)),
+                    None if self.doc.graph.defined_components().any(|d| d.name == def.name) => {
+                        ("declared on this canvas".to_string(), theme::dim(cx))
+                    }
+                    None => ("not declared in the project".to_string(), theme::warning(cx)),
+                };
+                base.justify_end()
+                    .text_color(color)
+                    .when(hovered && view.source.is_some(), |d| d.underline())
+                    .child(label)
+            }
             CardPart::AddField => base
                 .gap(px(4.0 * z))
                 .text_color(if hovered { theme::text(cx) } else { theme::dim(cx) })
@@ -311,6 +336,14 @@ impl Editor {
                 .child("Add field"),
         }
     }
+}
+
+/// What a component card draws: the component, and for a read-only copy, the file that
+/// declares it (`None` when this script does, or nothing does).
+struct CardView<'a> {
+    def: &'a ComponentDef,
+    source: Option<&'a str>,
+    readonly: bool,
 }
 
 /// A value as a field shows it: text in quotes, so an empty string or one with spaces reads

@@ -79,6 +79,15 @@ impl Document {
         id
     }
 
+    /// Adds a read-only copy of `name`, a component another script declares, at `at` in graph
+    /// units, and selects it.
+    pub fn add_component_copy(&mut self, name: &str, at: V2) -> NodeId {
+        self.checkpoint();
+        let id = self.graph.add_component_copy(name, at.x, at.y);
+        self.select_only(id);
+        id
+    }
+
     /// Gives each card among `ids` that repeats another card's name a free one, so a copied card
     /// declares a new component instead of the same one twice.
     pub(super) fn rename_copied_cards(&mut self, ids: &[NodeId]) {

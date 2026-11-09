@@ -61,6 +61,10 @@ pub struct PinDef {
 /// The kind of the node that declares a component. It has no pins: it's data, not logic.
 pub const DEFINE_COMPONENT: &str = "define.component";
 
+/// The kind of a read-only copy of a component declared in another script. Like the card, it
+/// has no pins. Not `component.…`, which [`NodeDef::is_field`] claims.
+pub const COMPONENT_COPY: &str = "copy.component";
+
 #[derive(Clone, Debug)]
 pub struct NodeDef {
     pub kind: &'static str,
@@ -83,6 +87,11 @@ impl NodeDef {
     /// The card that declares a component (see [`DEFINE_COMPONENT`]).
     pub fn is_definition(&self) -> bool {
         self.kind == DEFINE_COMPONENT
+    }
+
+    /// A read-only copy of a component declared elsewhere (see [`COMPONENT_COPY`]).
+    pub fn is_copy(&self) -> bool {
+        self.kind == COMPONENT_COPY
     }
 
     /// Get / Set Component: one menu entry per component field.
@@ -314,6 +323,14 @@ fn build() -> Vec<NodeDef> {
             vec![],
         ),
         def(
+            COMPONENT_COPY,
+            "Component",
+            "Components",
+            "A read-only copy of a component another script declares, to keep its fields in sight. Edit it in the script that declares it.",
+            vec![],
+            vec![],
+        ),
+        def(
             "component.get",
             "Get",
             "Components",
@@ -334,7 +351,7 @@ fn build() -> Vec<NodeDef> {
         def("var.set", "Set", "Variables", "Writes a graph variable.", vec![exec("in"), any("value")], vec![exec("then"), any("value")]),
     ];
     // Pure nodes go before the components and variables, so the menu keeps its order.
-    let at = defs.len() - 5;
+    let at = defs.len() - 6;
     defs.splice(at..at, vs_nodes::catalog().into_iter().map(pure));
     defs
 }

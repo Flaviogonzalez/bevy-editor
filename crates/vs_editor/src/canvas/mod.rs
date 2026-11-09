@@ -62,6 +62,9 @@ pub struct CanvasState {
     pub mouse: V2,
     /// The canvas origin in window coordinates and its size, written while painting.
     pub bounds: Rc<Cell<(V2, V2)>>,
+    /// A script a click asked to open (the link on a component copy). The mouse handler opens it,
+    /// since opening needs the window.
+    pub open_request: Option<std::path::PathBuf>,
 }
 
 impl CanvasState {
@@ -85,6 +88,7 @@ impl Default for CanvasState {
             hover: Hit::Empty,
             mouse: V2::default(),
             bounds: Rc::new(Cell::new((V2::default(), V2::new(800.0, 600.0)))),
+            open_request: None,
         }
     }
 }
@@ -151,6 +155,11 @@ impl Editor {
                     window.focus(&this.focus, cx);
                     let additive = e.modifiers.shift || e.modifiers.control;
                     this.left_down(this.canvas.to_local(e.position), additive);
+                    if let Some(path) = this.canvas.open_request.take()
+                        && this.confirm_discard()
+                    {
+                        this.open_path(path, window);
+                    }
                     cx.notify();
                 }),
             )
@@ -265,9 +274,39 @@ impl Editor {
         )
     }
 
+    /// The first card or copy on the canvas that shows `component`, and the point on its right
+    /// edge level with the row of field `path`, in graph units.
+    fn field_row(&self, layouts: &[NodeLayout], component: &str, path: &str) -> Option<(NodeId, V2)> {
+        let (node, def) = self.doc.graph.nodes.iter().find_map(|n| match (&n.component, &n.copy_of) {
+            (Some(def), _) if def.name == component => Some((n, def.clone())),
+            (None, Some(name)) if name == component => Some((n, layout::copy_view(&self.doc.graph, name).0)),
+            _ => None,
+        })?;
+        let i = def.fields.iter().position(|f| f.name == path)?;
+        let l = layouts.iter().find(|l| l.id == node.id)?;
+        let (_, rect) = l.parts.iter().find(|(part, _)| *part == layout::CardPart::FieldName(i))?;
+        Some((node.id, V2::new(l.rect.max.x, rect.min.y + rect.h() * 0.5)))
+    }
+
     fn scene(&self, layouts: &[NodeLayout], cx: &App) -> Scene {
         let find = |id: NodeId| layouts.iter().find(|l| l.id == id);
         let mut wires = Vec::new();
+        // A faint line from each Get / Set to its field's row on a card (or a copy) on this
+        // canvas, so it's plain which component a node reads or writes. Painted first, so the
+        // wires go over them.
+        for node in &self.doc.graph.nodes {
+            let Some((component, path)) = node.field.as_deref().and_then(vs_graph::components::split) else {
+                continue;
+            };
+            let Some((card, row)) = self.field_row(layouts, component, path) else { continue };
+            let lit = self.doc.selected.contains(&node.id) || self.doc.selected.contains(&card);
+            wires.push(WireSeg {
+                a: self.doc.to_screen(row),
+                b: self.doc.to_screen(V2::new(node.x, node.y + layout::HEADER_H * 0.5)),
+                color: theme::dim(cx).opacity(if lit { 0.8 } else { 0.3 }),
+                width: 1.2 * self.doc.zoom.max(0.6),
+            });
+        }
         for link in &self.doc.graph.links {
             let (Some(a), Some(b)) = (find(link.from.node), find(link.to.node)) else { continue };
             let (Some(pa), Some(pb)) = (

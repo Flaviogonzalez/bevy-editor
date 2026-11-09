@@ -57,6 +57,15 @@ pub fn lower(graph: &Graph) -> Lowered {
                     declares.push(declared);
                 }
             }
+            Some(def) if def.is_copy() => match &node.copy_of {
+                Some(name) if components::find(name).is_some_and(|c| c.source.is_some()) => {}
+                Some(name) if graph.defined_components().any(|d| d.name == *name) => {}
+                Some(name) => l.warning(
+                    node.id,
+                    format!("No script in the project declares `{name}`: it was renamed or removed"),
+                ),
+                None => l.error(node.id, "Component copy without a component".into()),
+            },
             Some(def) if def.is_variable() => match &node.var {
                 Some(name) if graph.variable(name).is_some() => {}
                 Some(name) => l.error(node.id, format!("Variable `{name}` doesn't exist")),

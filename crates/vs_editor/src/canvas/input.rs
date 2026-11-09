@@ -95,11 +95,23 @@ impl Editor {
             CardPart::Remove(i) => {
                 self.doc.remove_component_field(id, i);
             }
+            CardPart::Source => self.follow_copy(id),
             CardPart::AddField => {
                 self.doc.add_component_field(id);
                 let last = self.doc.graph.node(id).and_then(|n| n.component.as_ref()).map_or(0, |d| d.fields.len());
                 self.name_new(EditTarget::ComponentField(id, last.saturating_sub(1)));
             }
+        }
+    }
+
+    /// Asks to open the script that declares the component copy `id` shows. Opening replaces
+    /// the document and needs the window, so the canvas's mouse handler does it.
+    fn follow_copy(&mut self, id: NodeId) {
+        let Some(name) = self.doc.graph.node(id).and_then(|n| n.copy_of.clone()) else { return };
+        let Some(file) = layout::copy_view(&self.doc.graph, &name).1 else { return };
+        match &self.workspace.project {
+            Some(project) => self.canvas.open_request = Some(project.scripts_dir().join(file)),
+            None => self.chrome.status = format!("`{name}` is declared in {file}: open its project to go there"),
         }
     }
 

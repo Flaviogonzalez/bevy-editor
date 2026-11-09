@@ -17,7 +17,7 @@ use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::graph::{ComponentDef, Graph};
+use crate::graph::{ComponentDef, Graph, Value};
 use crate::library::PinType;
 
 /// Where a game's scripts live, relative to its root.
@@ -68,6 +68,10 @@ pub struct ComponentInfo {
     /// the game's own.
     pub rust_path: String,
     pub fields: Vec<FieldInfo>,
+    /// The script file that declares it, such as `stats.lua` in [`SCRIPTS_DIR`]; `None` for the
+    /// bundled and the game's own Rust components.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -76,6 +80,9 @@ pub struct FieldInfo {
     pub path: String,
     #[serde(rename = "type")]
     pub ty: PinType,
+    /// The starting value, known for the fields of declared components.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
 }
 
 struct Store {
@@ -126,7 +133,12 @@ pub fn declared_info(def: &ComponentDef) -> ComponentInfo {
     ComponentInfo {
         name: def.name.clone(),
         rust_path: format!("super::{}", def.name),
-        fields: def.fields.iter().map(|f| FieldInfo { path: f.name.clone(), ty: f.value.ty() }).collect(),
+        fields: def
+            .fields
+            .iter()
+            .map(|f| FieldInfo { path: f.name.clone(), ty: f.value.ty(), default: Some(f.value.clone()) })
+            .collect(),
+        source: None,
     }
 }
 
@@ -193,13 +205,14 @@ fn scan_declared(dir: &Path) -> Result<Vec<ComponentInfo>, String> {
     for file in &files {
         let Ok(source) = std::fs::read_to_string(file) else { continue };
         let Ok(graph) = crate::load_from_str(source.trim_start_matches('\u{feff}')) else { continue };
-        let path = format!("scripts/{}", file.file_name().unwrap_or_default().to_string_lossy());
+        let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let path = format!("scripts/{name}");
         if !graph.declares_only() {
             claim(crate::rust::names(&path).ty, format!("the component of {path}"))?;
         }
         for def in graph.defined_components() {
             claim(def.name.clone(), format!("the one declared in {path}"))?;
-            out.push(declared_info(def));
+            out.push(ComponentInfo { source: Some(name.clone()), ..declared_info(def) });
         }
     }
     Ok(out)
@@ -260,7 +273,9 @@ mod tests {
         let found = scan_declared(&dir).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].rust_path, "super::Health");
-        assert_eq!(found[0].fields, vec![FieldInfo { path: "value".into(), ty: PinType::Number }]);
+        assert_eq!(found[0].source.as_deref(), Some("health.lua"));
+        let value = FieldInfo { path: "value".into(), ty: PinType::Number, default: Some(Value::Number(1.0)) };
+        assert_eq!(found[0].fields, vec![value]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -164,6 +164,21 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_changes_no_code_and_warns_when_nothing_declares_it() {
+        let plain = compile(&spinner());
+        let mut g = spinner();
+        let copy = g.add_component_copy("NoSuchThing", 0.0, 300.0);
+        let out = compile(&g);
+        assert_eq!(out.lua, plain.lua);
+        assert_eq!(out.errors(), 0);
+        assert!(out.problems.iter().any(|p| p.node == Some(copy) && p.severity == Severity::Warning));
+        // A copy of a component this script declares itself is fine.
+        g.add_component_def(ComponentDef { name: "NoSuchThing".into(), fields: Vec::new() }, 0.0, 500.0);
+        assert!(compile(&g).problems.iter().all(|p| p.node != Some(copy)));
+        assert_eq!(load_from_str(&save_to_string(&g)).unwrap(), g);
+    }
+
+    #[test]
     fn rejects_mismatched_pins() {
         let mut g = Graph::default();
         let start = g.add_node("event.start", None, 0.0, 0.0);

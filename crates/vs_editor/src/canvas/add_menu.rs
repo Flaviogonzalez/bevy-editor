@@ -107,7 +107,7 @@ impl Editor {
 pub struct MenuEntry {
     pub kind: &'static str,
     pub var: Option<String>,
-    /// `Component.path`, for Get / Set field nodes.
+    /// `Component.path`, for Get / Set field nodes; the component's name, for a copy.
     pub field: Option<String>,
     pub label: String,
     pub category: &'static str,
@@ -150,6 +150,22 @@ impl Editor {
                     label: format!("New {}", def.title),
                     category: def.category,
                 });
+            } else if def.is_copy() {
+                // Components other scripts declare. The open script's own come from its cards.
+                let file = self.doc.file_name();
+                for c in vs_graph::components::all() {
+                    let Some(source) = &c.source else { continue };
+                    if *source == file || self.doc.graph.defined_components().any(|d| d.name == c.name) {
+                        continue;
+                    }
+                    entries.push(MenuEntry {
+                        kind: def.kind,
+                        var: None,
+                        label: format!("Copy of {} ({source})", c.name),
+                        field: Some(c.name),
+                        category: def.category,
+                    });
+                }
             } else if def.is_variable() {
                 for var in &self.doc.graph.variables {
                     entries.push(MenuEntry {
@@ -209,6 +225,7 @@ impl Editor {
             field: entry.field.clone(),
             name: None,
             component: None,
+            copy_of: None,
         };
         let pins = self.doc.graph.pins_of(&probe);
         let candidates = match side {
@@ -230,6 +247,10 @@ impl Editor {
             // No pins, so no wire opened the menu for it (see `fits`).
             let id = self.doc.add_component(menu.graph_at);
             self.name_new(EditTarget::ComponentName(id));
+            return;
+        }
+        if let (Some(true), Some(name)) = (library::find(entry.kind).map(|d| d.is_copy()), &entry.field) {
+            self.doc.add_component_copy(name, menu.graph_at);
             return;
         }
         self.doc.checkpoint();

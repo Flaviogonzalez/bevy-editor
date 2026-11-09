@@ -46,7 +46,7 @@ impl Editor {
             (None, Some(name)) => name.clone(),
             (None, None) => "(unnamed)".into(),
         };
-        let declared = node.component.as_ref().map(|c| &c.name);
+        let declared = node.component.as_ref().map(|c| &c.name).or(node.copy_of.as_ref());
         let title = match node.var.as_ref().or(node.field.as_ref()).or(declared) {
             Some(subject) => format!("{} {subject}", def.title),
             None => def.title.to_string(),
@@ -75,8 +75,9 @@ impl Editor {
                     .child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(def.category))
                     .child(div().text_color(theme::dim(cx)).child(def.description)),
             )
-            // A node's name names its value in exported Rust; a card is named on the canvas.
-            .when(!def.is_definition(), |d| {
+            // A node's name names its value in exported Rust; a card is named on the canvas, and
+            // a copy has the name of what it copies.
+            .when(!def.is_definition() && !def.is_copy(), |d| {
                 d.child(group("Name", None, cx).child(field("node-name".into(), name, editing.is_some(), cx).on_click(
                     cx.listener(move |this, _, _, cx| {
                         this.start_edit(EditTarget::NodeName(id));
