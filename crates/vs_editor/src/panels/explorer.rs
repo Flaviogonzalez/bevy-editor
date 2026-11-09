@@ -29,7 +29,7 @@ impl Editor {
     }
 
     fn project_group(&self, cx: &mut Context<Self>) -> Div {
-        let Some(project) = self.project.as_ref() else {
+        let Some(project) = self.workspace.project.as_ref() else {
             return group("Project", None, cx)
                 .child(
                     div()
@@ -62,7 +62,7 @@ impl Editor {
                 );
         };
         let rows = project.scripts().into_iter().enumerate().map(|(i, path)| {
-            let open = self.path.as_ref() == Some(&path);
+            let open = self.doc.path.as_ref() == Some(&path);
             let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             div()
                 .id(("script", i))
@@ -79,7 +79,7 @@ impl Editor {
                 .child(Icon::new(IconName::FileText).small())
                 .child(name)
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.path.as_ref() != Some(&path) && this.confirm_discard() {
+                    if this.doc.path.as_ref() != Some(&path) && this.confirm_discard() {
                         this.open_path(path.clone(), window);
                     }
                     cx.notify();
@@ -145,7 +145,7 @@ impl Editor {
 
     fn variables_group(&self, cx: &mut Context<Self>) -> Div {
         let editor = cx.entity().downgrade();
-        let rows = self.graph.variables.iter().enumerate().map(|(i, var)| {
+        let rows = self.doc.graph.variables.iter().enumerate().map(|(i, var)| {
             let editing_name = self.editing.as_ref().filter(|e| e.target == EditTarget::VarName(i));
             let editing_value = self.editing.as_ref().filter(|e| e.target == EditTarget::VarValue(i));
             let ty = var.value.ty();
@@ -228,9 +228,9 @@ impl Editor {
                     )
                     .w(px(if wide { 96.0 } else { 56.0 }))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(Value::Bool(b)) = this.graph.variables.get(i).map(|v| v.value.clone()) {
+                        if let Some(Value::Bool(b)) = this.doc.graph.variables.get(i).map(|v| v.value.clone()) {
                             this.checkpoint();
-                            this.graph.variables[i].value = Value::Bool(!b);
+                            this.doc.graph.variables[i].value = Value::Bool(!b);
                         } else {
                             this.start_edit(EditTarget::VarValue(i));
                         }
@@ -250,7 +250,7 @@ impl Editor {
                 cx.notify();
             }));
         group("Variables", Some(add.into_any_element()), cx)
-            .when(self.graph.variables.is_empty(), |d| {
+            .when(self.doc.graph.variables.is_empty(), |d| {
                 d.child(div().text_color(theme::dim(cx)).child("No variables. A variable keeps a value between frames."))
             })
             .children(rows)

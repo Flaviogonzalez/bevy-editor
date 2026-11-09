@@ -11,44 +11,44 @@ use crate::workspace::tasks::{Outcome, Task, Then};
 
 impl Editor {
     pub fn open_settings(&mut self) {
-        self.dialog = Some(Dialog::Settings);
+        self.chrome.dialog = Some(Dialog::Settings);
     }
 
     /// Asks for a new projects folder and saves it.
     pub fn change_projects_dir(&mut self) {
         let mut picker = rfd::FileDialog::new().set_title("Folder for new projects");
-        if self.config.projects_dir.exists() {
-            picker = picker.set_directory(&self.config.projects_dir);
+        if self.workspace.config.projects_dir.exists() {
+            picker = picker.set_directory(&self.workspace.config.projects_dir);
         }
         let Some(dir) = picker.pick_folder() else { return };
-        self.config.projects_dir = dir;
-        match self.config.save() {
-            Ok(()) => self.status = format!("New projects go in {}", self.config.projects_dir.display()),
-            Err(e) => self.status = format!("Couldn't save the settings: {e}"),
+        self.workspace.config.projects_dir = dir;
+        match self.workspace.config.save() {
+            Ok(()) => self.chrome.status = format!("New projects go in {}", self.workspace.config.projects_dir.display()),
+            Err(e) => self.chrome.status = format!("Couldn't save the settings: {e}"),
         }
     }
 
     pub fn new_project_dialog(&mut self) {
-        self.dialog = Some(Dialog::NewProject { buffer: String::new() });
+        self.chrome.dialog = Some(Dialog::NewProject { buffer: String::new() });
     }
 
     pub fn new_script_dialog(&mut self) {
-        if self.project.is_some() {
-            self.dialog = Some(Dialog::NewScript { buffer: String::new() });
+        if self.workspace.project.is_some() {
+            self.chrome.dialog = Some(Dialog::NewScript { buffer: String::new() });
         }
     }
 
     pub fn dialog_key(&mut self, key: &str, typed: Option<String>, window: &mut Window) {
         match key {
-            "escape" => self.dialog = None,
+            "escape" => self.chrome.dialog = None,
             "enter" => self.confirm_dialog(window),
             "backspace" => {
-                if let Some(Dialog::NewProject { buffer } | Dialog::NewScript { buffer }) = &mut self.dialog {
+                if let Some(Dialog::NewProject { buffer } | Dialog::NewScript { buffer }) = &mut self.chrome.dialog {
                     buffer.pop();
                 }
             }
             _ => {
-                if let (Some(t), Some(Dialog::NewProject { buffer } | Dialog::NewScript { buffer })) = (typed, &mut self.dialog) {
+                if let (Some(t), Some(Dialog::NewProject { buffer } | Dialog::NewScript { buffer })) = (typed, &mut self.chrome.dialog) {
                     buffer.push_str(&t);
                 }
             }
@@ -56,38 +56,38 @@ impl Editor {
     }
 
     pub fn confirm_dialog(&mut self, window: &mut Window) {
-        match self.dialog.take() {
+        match self.chrome.dialog.take() {
             Some(Dialog::NewProject { buffer }) => {
                 if !self.confirm_discard() {
                     return;
                 }
-                match vs_project::create(&self.config.projects_dir, &buffer) {
+                match vs_project::create(&self.workspace.config.projects_dir, &buffer) {
                     Ok(project) => {
                         self.enter_project(project, window);
-                        self.status = format!("Created {}. Press Preview to run it", self.status_path());
+                        self.chrome.status = format!("Created {}. Press Preview to run it", self.status_path());
                     }
                     Err(e) => {
-                        self.status = format!("Couldn't create the project: {e}");
-                        self.dialog = Some(Dialog::NewProject { buffer });
+                        self.chrome.status = format!("Couldn't create the project: {e}");
+                        self.chrome.dialog = Some(Dialog::NewProject { buffer });
                     }
                 }
             }
             Some(Dialog::NewScript { buffer }) => {
-                let Some(project) = self.project.clone() else { return };
+                let Some(project) = self.workspace.project.clone() else { return };
                 if !self.confirm_discard() {
                     return;
                 }
                 match project.new_script(&buffer) {
                     Ok(path) => {
                         self.open_path(path, window);
-                        if let Some(stem) = self.path.as_ref().and_then(|p| p.file_stem()) {
+                        if let Some(stem) = self.doc.path.as_ref().and_then(|p| p.file_stem()) {
                             let ty = vs_graph::rust::names(&stem.to_string_lossy()).ty;
-                            self.status = format!("Spawn `scripts::{ty}::default()` on an entity in src/main.rs to use it");
+                            self.chrome.status = format!("Spawn `scripts::{ty}::default()` on an entity in src/main.rs to use it");
                         }
                     }
                     Err(e) => {
-                        self.status = format!("Couldn't add the script: {e}");
-                        self.dialog = Some(Dialog::NewScript { buffer });
+                        self.chrome.status = format!("Couldn't add the script: {e}");
+                        self.chrome.dialog = Some(Dialog::NewScript { buffer });
                     }
                 }
             }
@@ -96,7 +96,7 @@ impl Editor {
     }
 
     fn status_path(&self) -> String {
-        self.project.as_ref().map(|p| p.root.display().to_string()).unwrap_or_default()
+        self.workspace.project.as_ref().map(|p| p.root.display().to_string()).unwrap_or_default()
     }
 
     /// Picks a project folder, starting in the projects folder.
@@ -105,13 +105,13 @@ impl Editor {
             return;
         }
         let mut picker = rfd::FileDialog::new().set_title("Open project");
-        if self.config.projects_dir.exists() {
-            picker = picker.set_directory(&self.config.projects_dir);
+        if self.workspace.config.projects_dir.exists() {
+            picker = picker.set_directory(&self.workspace.config.projects_dir);
         }
         let Some(dir) = picker.pick_folder() else { return };
         match Project::open(&dir) {
             Ok(project) => self.enter_project(project, window),
-            Err(e) => self.status = format!("{e}"),
+            Err(e) => self.chrome.status = format!("{e}"),
         }
     }
 
@@ -124,7 +124,7 @@ impl Editor {
         if loaded.is_err() {
             vs_graph::components::set_project(Vec::new());
         }
-        self.project = Some(project);
+        self.workspace.project = Some(project);
         loaded
     }
 
@@ -135,9 +135,9 @@ impl Editor {
         match first {
             Some(path) => self.open_path(path, window),
             None => {
-                *self = Self { graph: vs_graph::Graph::default(), path: None, ..self.reset() };
+                self.reset(vs_graph::Graph::default(), None);
                 if let Err(e) = catalog {
-                    self.status = e;
+                    self.chrome.status = e;
                 }
                 self.update_title(window);
             }
@@ -146,40 +146,40 @@ impl Editor {
 
     /// Saves the open script before a run, so the game sees what's on screen.
     fn save_for_run(&mut self, window: &mut Window) -> bool {
-        if !self.history.is_dirty() {
+        if !self.doc.history.is_dirty() {
             return true;
         }
-        match self.path.clone() {
+        match self.doc.path.clone() {
             Some(_) => {
                 self.save(window);
-                !self.history.is_dirty()
+                !self.doc.history.is_dirty()
             }
             None => {
-                self.status = "Save the script into the project first".into();
+                self.chrome.status = "Save the script into the project first".into();
                 false
             }
         }
     }
 
     pub fn task_running(&self) -> bool {
-        self.task.borrow().as_ref().is_some_and(|t| t.finished().is_none())
+        self.workspace.task.borrow().as_ref().is_some_and(|t| t.finished().is_none())
     }
 
     /// Runs the game with its scripts in Lua. Saving a script while it runs reloads it.
     pub fn run_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.project.clone() else { return };
+        let Some(project) = self.workspace.project.clone() else { return };
         if self.task_running() || !self.save_for_run(window) {
             return;
         }
         let command = vs_project::cargo(&project.root, &["run", "--color", "never", "--features", "preview"]);
         self.start(Task::spawn(format!("Preview {}", project.name), command, None), cx);
-        self.status = "Starting the preview. The first build takes a few minutes; later ones are quick".into();
+        self.chrome.status = "Starting the preview. The first build takes a few minutes; later ones are quick".into();
     }
 
     /// Runs the game only to write its catalog of components (`.bevy-editor/components.json`),
     /// as its `.bevy-editor/catalog.toml` asks: no window, and it exits once done.
     pub fn refresh_catalog(&mut self, cx: &mut Context<Self>) {
-        let Some(project) = self.project.clone() else { return };
+        let Some(project) = self.workspace.project.clone() else { return };
         if self.task_running() {
             return;
         }
@@ -187,59 +187,59 @@ impl Editor {
         command.env(vs_graph::components::CATALOG_ENV, "1");
         let label = format!("Catalog of {}", project.name);
         self.start(Task::spawn(label, command, Some(Then::Catalog(project.root.clone()))), cx);
-        self.status = "Building the game to read its components…".into();
+        self.chrome.status = "Building the game to read its components…".into();
     }
 
     /// Opens the project's catalog config in the system's editor for `.toml` files, writing the
     /// default one first if there's none.
     pub fn edit_catalog(&mut self) {
-        let Some(project) = &self.project else { return };
+        let Some(project) = &self.workspace.project else { return };
         let path = project.catalog_config();
         if !path.exists() {
             let written = std::fs::create_dir_all(path.parent().unwrap())
                 .and_then(|()| std::fs::write(&path, vs_graph::components::DEFAULT_CONFIG));
             if let Err(e) = written {
-                self.status = format!("Couldn't write {}: {e}", path.display());
+                self.chrome.status = format!("Couldn't write {}: {e}", path.display());
                 return;
             }
         }
         if let Err(e) = open_with_system(&path) {
-            self.status = format!("Couldn't open {}: {e}", path.display());
+            self.chrome.status = format!("Couldn't open {}: {e}", path.display());
         } else {
-            self.status = "Edit the catalog, save it, then Refresh catalog".into();
+            self.chrome.status = "Edit the catalog, save it, then Refresh catalog".into();
         }
     }
 
     /// Exports the project as plain Bevy, builds it in release and packages it in `dist`.
     pub fn build(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.project.clone() else { return };
+        let Some(project) = self.workspace.project.clone() else { return };
         if self.task_running() || !self.save_for_run(window) {
             return;
         }
         if let Err(e) = vs_project::export(&project, &project.export_dir()) {
-            self.status = format!("Couldn't export: {e}");
+            self.chrome.status = format!("Couldn't export: {e}");
             return;
         }
         let command = vs_project::cargo(&project.export_dir(), &["build", "--release", "--color", "never"]);
         let label = format!("Build {}", project.name);
         self.start(Task::spawn(label, command, Some(Then::Package(project))), cx);
-        self.status = "Exported. Building in release…".into();
+        self.chrome.status = "Exported. Building in release…".into();
     }
 
     pub fn stop_task(&mut self) {
-        if let Some(task) = self.task.borrow().as_ref() {
+        if let Some(task) = self.workspace.task.borrow().as_ref() {
             task.stop();
         }
-        self.status = "Stopped".into();
+        self.chrome.status = "Stopped".into();
     }
 
     fn start(&mut self, task: std::io::Result<Task>, cx: &mut Context<Self>) {
         match task {
             Ok(task) => {
-                *self.task.borrow_mut() = Some(task);
+                *self.workspace.task.borrow_mut() = Some(task);
                 // Show what the run prints.
-                self.show_bottom_panel = true;
-                self.bottom_tab = BottomTab::Output;
+                self.chrome.show_bottom_panel = true;
+                self.chrome.bottom_tab = BottomTab::Output;
                 cx.spawn(async move |this, cx| {
                     loop {
                         cx.background_executor().timer(Duration::from_millis(250)).await;
@@ -254,19 +254,19 @@ impl Editor {
                 })
                 .detach();
             }
-            Err(e) => self.status = format!("Couldn't start cargo: {e}"),
+            Err(e) => self.chrome.status = format!("Couldn't start cargo: {e}"),
         }
     }
 
     /// Finishes a task that has exited. Returns whether it's still running.
     pub fn poll_task(&mut self) -> bool {
-        let mut task = self.task.borrow_mut();
+        let mut task = self.workspace.task.borrow_mut();
         let Some(t) = task.as_mut() else { return false };
         let Some(outcome) = t.finished() else { return true };
         let then = t.then.take();
         let label = t.label.clone();
         drop(task);
-        self.status = match (outcome, then) {
+        self.chrome.status = match (outcome, then) {
             (Outcome::Succeeded, Some(Then::Package(project))) => match vs_project::package(&project) {
                 Ok(exe) => format!("Built {}. Its folder is ready to ship", exe.display()),
                 Err(e) => format!("The build finished but couldn't be packaged: {e}"),
@@ -287,7 +287,7 @@ impl Editor {
     }
 
     fn is_current_project(&self, root: &std::path::Path) -> bool {
-        self.project.as_ref().is_some_and(|p| p.root == root)
+        self.workspace.project.as_ref().is_some_and(|p| p.root == root)
     }
 }
 

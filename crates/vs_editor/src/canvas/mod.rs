@@ -6,7 +6,9 @@
 //! - `add_menu`: the searchable menu that adds a node.
 //! - `paint`: what is painted directly rather than as elements (grid, wires, selection box).
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use gpui_kit::{
     App, Context, IntoElement, MouseButton, MouseDownEvent,
@@ -19,8 +21,8 @@ use gpui_kit::component::empty::{
 use gpui_kit::component::{Icon, IconName};
 use vs_graph::{Compiled, NodeId, PinType, Severity, Side};
 
-use crate::editor::{Drag, Editor};
-use layout::{NodeLayout, Rect, V2};
+use crate::editor::{Drag, Editor, Menu};
+use layout::{Hit, NodeLayout, Rect, V2};
 use crate::theme;
 use paint::paint_scene;
 
@@ -30,6 +32,31 @@ mod node;
 mod paint;
 
 pub const MENU_ROWS: usize = 10;
+
+/// The pointer's interaction with the canvas. None of it is saved or undone: it describes what
+/// the mouse is doing to the document, not the document.
+pub struct CanvasState {
+    pub drag: Drag,
+    pub menu: Option<Menu>,
+    /// What lies under the pointer, so the canvas can highlight the node or pin it would act on.
+    pub hover: Hit,
+    /// Last pointer position, canvas-local.
+    pub mouse: V2,
+    /// The canvas origin in window coordinates and its size, written while painting.
+    pub bounds: Rc<Cell<(V2, V2)>>,
+}
+
+impl Default for CanvasState {
+    fn default() -> Self {
+        Self {
+            drag: Drag::None,
+            menu: None,
+            hover: Hit::Empty,
+            mouse: V2::default(),
+            bounds: Rc::new(Cell::new((V2::default(), V2::new(800.0, 600.0)))),
+        }
+    }
+}
 
 struct WireSeg {
     a: V2,
@@ -67,7 +94,7 @@ impl Editor {
         }
 
         let scene = self.scene(layouts, cx);
-        let cell = self.canvas.clone();
+        let cell = self.canvas.bounds.clone();
         let painter = canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
@@ -146,14 +173,14 @@ impl Editor {
             .child(painter);
 
         for l in layouts {
-            if let Some(node) = self.graph.node(l.id) {
+            if let Some(node) = self.doc.graph.node(l.id) {
                 area = area.child(self.node_element(node, l, flagged.get(&l.id).copied(), cx));
             }
         }
-        if self.graph.nodes.is_empty() && self.menu.is_none() {
+        if self.doc.graph.nodes.is_empty() && self.canvas.menu.is_none() {
             area = area.child(self.empty_state(cx));
         }
-        if self.menu.is_some() {
+        if self.canvas.menu.is_some() {
             area = area.child(self.menu_element(cx));
         }
         area
@@ -183,7 +210,7 @@ impl Editor {
                 EmptyContent::new().flex_row().justify_center().gap_2().child(
                     Button::new("empty-add-node").primary().icon(IconName::Plus).label("Add node").on_click(
                         cx.listener(|this, _, _, cx| {
-                            let (_, size) = this.canvas.get();
+                            let (_, size) = this.canvas.bounds.get();
                             this.open_menu(size * 0.5, None);
                             cx.notify();
                         }),
@@ -210,7 +237,7 @@ impl Editor {
     fn scene(&self, layouts: &[NodeLayout], cx: &App) -> Scene {
         let find = |id: NodeId| layouts.iter().find(|l| l.id == id);
         let mut wires = Vec::new();
-        for link in &self.graph.links {
+        for link in &self.doc.graph.links {
             let (Some(a), Some(b)) = (find(link.from.node), find(link.to.node)) else { continue };
             let (Some(pa), Some(pb)) = (
                 a.pin_center(&link.from.pin, Side::Output),
@@ -218,21 +245,21 @@ impl Editor {
             ) else {
                 continue;
             };
-            let ty = self.graph.pin(&link.from, Side::Output).map_or(PinType::Any, |p| p.ty);
-            let lit = self.selected.contains(&link.from.node) || self.selected.contains(&link.to.node);
+            let ty = self.doc.graph.pin(&link.from, Side::Output).map_or(PinType::Any, |p| p.ty);
+            let lit = self.doc.selected.contains(&link.from.node) || self.doc.selected.contains(&link.to.node);
             let base = if ty == PinType::Exec { 2.6 } else { 2.0 };
             wires.push(WireSeg {
                 a: self.to_screen(pa),
                 b: self.to_screen(pb),
                 color: if lit { theme::text(cx) } else { theme::pin(ty).into() },
-                width: (base + if lit { 0.8 } else { 0.0 }) * self.zoom.max(0.6),
+                width: (base + if lit { 0.8 } else { 0.0 }) * self.doc.zoom.max(0.6),
             });
         }
-        if let Drag::Wire { anchor, side, cursor, .. } = &self.drag
+        if let Drag::Wire { anchor, side, cursor, .. } = &self.canvas.drag
             && let Some(l) = find(anchor.node)
             && let Some(p) = l.pin_center(&anchor.pin, *side)
         {
-            let ty = self.graph.pin(anchor, *side).map_or(PinType::Any, |p| p.ty);
+            let ty = self.doc.graph.pin(anchor, *side).map_or(PinType::Any, |p| p.ty);
             let (a, b) = match side {
                 Side::Output => (p, *cursor),
                 Side::Input => (*cursor, p),
@@ -241,18 +268,18 @@ impl Editor {
                 a: self.to_screen(a),
                 b: self.to_screen(b),
                 color: theme::pin(ty).into(),
-                width: 2.0 * self.zoom.max(0.6),
+                width: 2.0 * self.doc.zoom.max(0.6),
             });
         }
-        let selection = match &self.drag {
+        let selection = match &self.canvas.drag {
             Drag::Select { start, cursor, .. } => {
                 Some(Rect::from_points(self.to_screen(*start), self.to_screen(*cursor)))
             }
             _ => None,
         };
         Scene {
-            pan: self.pan,
-            zoom: self.zoom,
+            pan: self.doc.pan,
+            zoom: self.doc.zoom,
             wires,
             selection,
             grid_minor: theme::grid_minor(cx),

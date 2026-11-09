@@ -4,8 +4,8 @@
 mod actions;
 mod app;
 mod canvas;
+mod document;
 mod editor;
-mod history;
 mod panels;
 mod theme;
 mod ui;

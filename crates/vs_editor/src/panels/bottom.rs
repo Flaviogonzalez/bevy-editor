@@ -22,16 +22,16 @@ impl Editor {
     /// output of the last preview or build, and the generated code.
     pub(crate) fn bottom_panel(&self, compiled: &Compiled, cx: &mut Context<Self>) -> impl IntoElement {
         const TABS: [BottomTab; 3] = [BottomTab::Problems, BottomTab::Output, BottomTab::Code];
-        let selected = TABS.iter().position(|t| *t == self.bottom_tab).unwrap_or(0);
+        let selected = TABS.iter().position(|t| *t == self.chrome.bottom_tab).unwrap_or(0);
         let count = compiled.problems.len();
-        let output = match self.task.borrow().as_ref().map(|t| t.finished()) {
+        let output = match self.workspace.task.borrow().as_ref().map(|t| t.finished()) {
             Some(None) => "Output · running",
             _ => "Output",
         };
         let code_toggle = |id: &'static str, label: &'static str, view: CodeView| {
-            Button::new(id).ghost().xsmall().tab_stop(false).label(label).selected(self.code_view == view).on_click(
+            Button::new(id).ghost().xsmall().tab_stop(false).label(label).selected(self.chrome.code_view == view).on_click(
                 cx.listener(move |this, _, _, cx| {
-                    this.code_view = view;
+                    this.chrome.code_view = view;
                     cx.notify();
                 }),
             )
@@ -45,7 +45,7 @@ impl Editor {
             .child(Tab::new().label(output))
             .child(Tab::new().label("Code"))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                this.bottom_tab = TABS[*ix];
+                this.chrome.bottom_tab = TABS[*ix];
                 cx.notify();
             }))
             .suffix(
@@ -55,21 +55,21 @@ impl Editor {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .when(self.bottom_tab == BottomTab::Code, |d| {
+                    .when(self.chrome.bottom_tab == BottomTab::Code, |d| {
                         d.child(code_toggle("view-lua", "Lua (preview)", CodeView::Lua))
                             .child(code_toggle("view-rust", "Rust (build)", CodeView::Rust))
                     })
                     .child(icon_button("panel-hide", IconName::Close, "Hide panel", &actions::ToggleBottomPanel)),
             );
-        let body = match self.bottom_tab {
+        let body = match self.chrome.bottom_tab {
             BottomTab::Problems => self.problems_list(compiled, cx).into_any_element(),
             BottomTab::Output => self.output_log(cx).into_any_element(),
             BottomTab::Code => {
-                let code = match self.code_view {
+                let code = match self.chrome.code_view {
                     CodeView::Lua => compiled.lua.clone(),
                     CodeView::Rust => self.rust_code(compiled),
                 };
-                code_block(&code, if self.code_view == CodeView::Lua { "--" } else { "//" }, cx).into_any_element()
+                code_block(&code, if self.chrome.code_view == CodeView::Lua { "--" } else { "//" }, cx).into_any_element()
             }
         };
         div()
@@ -117,7 +117,7 @@ impl Editor {
     }
 
     fn output_log(&self, cx: &App) -> Div {
-        let task = self.task.borrow();
+        let task = self.workspace.task.borrow();
         let Some(task) = task.as_ref() else {
             return div()
                 .p_1()
@@ -153,7 +153,7 @@ impl Editor {
             return "// Fix the errors to see the Rust code.".into();
         }
         let stem = self
-            .path
+            .doc.path
             .as_ref()
             .and_then(|p| p.file_stem())
             .map_or("script".into(), |s| s.to_string_lossy().into_owned());

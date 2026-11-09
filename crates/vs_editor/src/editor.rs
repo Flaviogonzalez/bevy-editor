@@ -1,16 +1,15 @@
 //! Editor state and everything that changes it. Drawing lives in `app.rs`, `canvas/` and `panels/`.
 
-use std::cell::Cell;
-use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use gpui_kit::{Context, FocusHandle, KeyDownEvent, Window};
 use vs_graph::{Graph, NodeId, PinRef, PinType, Side, Value, Variable, library};
 
-use crate::history::History;
+use crate::canvas::CanvasState;
+use crate::document::Document;
+use crate::panels::Chrome;
+use crate::workspace::Workspace;
 use crate::canvas::layout::{self, Hit, NodeLayout, Rect, V2};
-use crate::workspace::tasks::Task;
 
 pub const MIN_ZOOM: f32 = 0.3;
 pub const MAX_ZOOM: f32 = 2.0;
@@ -88,37 +87,22 @@ pub enum CodeView {
     Rust,
 }
 
+/// The editor window's state, split by who owns it. Every panel and the canvas still render
+/// from `&Editor`, but each part changes for its own reasons:
+///
+/// - `doc`: the open script and its undo history; later there will be one per open file.
+/// - `canvas`: the pointer's interaction with the canvas (drags, the add-node menu, hover).
+/// - `chrome`: the panels' own state (bottom tab, dialog, status line).
+/// - `workspace`: the project, the settings and the cargo run, which outlive the open script.
 pub struct Editor {
-    pub graph: Graph,
-    pub path: Option<PathBuf>,
-    pub pan: V2,
-    pub zoom: f32,
-    pub selected: BTreeSet<NodeId>,
-    pub drag: Drag,
-    pub menu: Option<Menu>,
+    pub doc: Document,
+    pub canvas: CanvasState,
+    pub chrome: Chrome,
+    pub workspace: Workspace,
+    /// The text edit that has the keyboard, in a node's field on the canvas or in a panel. It
+    /// lives here, not in `canvas` or `chrome`, because either side can start one.
     pub editing: Option<Editing>,
-    /// Undo, redo and unsaved changes.
-    pub history: History,
     pub focus: FocusHandle,
-    /// Whether the panel under the canvas shows, and which of its tabs.
-    pub show_bottom_panel: bool,
-    pub bottom_tab: BottomTab,
-    pub status: String,
-    /// Last pointer position, canvas-local.
-    pub mouse: V2,
-    /// What lies under the pointer, so the canvas can highlight the node or pin it would act on.
-    pub hover: Hit,
-    /// The canvas origin in window coordinates and its size, written while painting.
-    pub canvas: Rc<Cell<(V2, V2)>>,
-    pub config: vs_project::Config,
-    /// The project the open script belongs to, if any. Change it with [`Editor::set_project`],
-    /// which also loads that project's catalog of components.
-    pub project: Option<vs_project::Project>,
-    pub dialog: Option<Dialog>,
-    pub code_view: CodeView,
-    /// The cargo run in progress or last finished (preview or build). Shared across resets so
-    /// opening another script doesn't stop it.
-    pub task: Rc<std::cell::RefCell<Option<Task>>>,
 }
 
 impl Editor {
@@ -126,70 +110,55 @@ impl Editor {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         Self {
-            graph: Graph::default(),
-            path: None,
-            pan: V2::new(60.0, 60.0),
-            zoom: 1.0,
-            selected: BTreeSet::new(),
-            drag: Drag::None,
-            menu: None,
+            doc: Document::default(),
+            canvas: CanvasState::default(),
+            chrome: Chrome::default(),
+            workspace: Workspace::default(),
             editing: None,
-            history: History::default(),
             focus,
-            show_bottom_panel: true,
-            bottom_tab: BottomTab::Code,
-            status: String::new(),
-            mouse: V2::default(),
-            hover: Hit::Empty,
-            canvas: Rc::new(Cell::new((V2::default(), V2::new(800.0, 600.0)))),
-            config: vs_project::Config::load(),
-            project: None,
-            dialog: None,
-            code_view: CodeView::Lua,
-            task: Rc::new(std::cell::RefCell::new(None)),
         }
     }
 
     // Coordinates ------------------------------------------------------------------------------
 
     pub fn to_local(&self, window_pos: gpui_kit::Point<gpui_kit::Pixels>) -> V2 {
-        let origin = self.canvas.get().0;
+        let origin = self.canvas.bounds.get().0;
         V2::new(window_pos.x.as_f32() - origin.x, window_pos.y.as_f32() - origin.y)
     }
 
     pub fn to_graph(&self, local: V2) -> V2 {
-        (local - self.pan) * (1.0 / self.zoom)
+        (local - self.doc.pan) * (1.0 / self.doc.zoom)
     }
 
     pub fn to_screen(&self, graph: V2) -> V2 {
-        graph * self.zoom + self.pan
+        graph * self.doc.zoom + self.doc.pan
     }
 
     pub fn layouts(&self) -> Vec<NodeLayout> {
-        self.graph.nodes.iter().map(|n| layout::layout(&self.graph, n)).collect()
+        self.doc.graph.nodes.iter().map(|n| layout::layout(&self.doc.graph, n)).collect()
     }
 
     // History ----------------------------------------------------------------------------------
 
     /// Call before every change to the graph.
     pub fn checkpoint(&mut self) {
-        self.history.record(self.graph.clone());
+        self.doc.history.record(self.doc.graph.clone());
     }
 
     pub fn undo(&mut self) {
-        if self.history.undo(&mut self.graph) {
+        if self.doc.history.undo(&mut self.doc.graph) {
             self.after_history();
         }
     }
 
     pub fn redo(&mut self) {
-        if self.history.redo(&mut self.graph) {
+        if self.doc.history.redo(&mut self.doc.graph) {
             self.after_history();
         }
     }
 
     fn after_history(&mut self) {
-        self.selected.retain(|id| self.graph.node(*id).is_some());
+        self.doc.selected.retain(|id| self.doc.graph.node(*id).is_some());
         self.editing = None;
     }
 
@@ -197,34 +166,34 @@ impl Editor {
 
     pub fn left_down(&mut self, local: V2, additive: bool) {
         self.commit_edit();
-        self.menu = None;
+        self.canvas.menu = None;
         let g = self.to_graph(local);
         let layouts = self.layouts();
         match layout::hit_test(&layouts, g) {
             Hit::Pin(pin, side) => {
                 // Grabbing a connected input picks its wire back up from the source.
                 let existing = match side {
-                    Side::Input => self.graph.links_to(&pin).next().cloned(),
+                    Side::Input => self.doc.graph.links_to(&pin).next().cloned(),
                     Side::Output => None,
                 };
                 if let Some(link) = existing {
                     // One undo step for the whole gesture: recorded when the drag ends.
-                    let before = self.graph.clone();
-                    self.graph.links.retain(|l| l != &link);
-                    self.drag =
+                    let before = self.doc.graph.clone();
+                    self.doc.graph.links.retain(|l| l != &link);
+                    self.canvas.drag =
                         Drag::Wire { anchor: link.from, side: Side::Output, cursor: g, before: Some(before) };
                 } else {
-                    self.drag = Drag::Wire { anchor: pin, side, cursor: g, before: None };
+                    self.canvas.drag = Drag::Wire { anchor: pin, side, cursor: g, before: None };
                 }
             }
             Hit::Field(node, pin) => {
-                let Some(value) = self.graph.node(node).and_then(|n| n.values.get(&pin)).cloned()
+                let Some(value) = self.doc.graph.node(node).and_then(|n| n.values.get(&pin)).cloned()
                 else {
                     return;
                 };
                 if let Value::Bool(b) = value {
                     self.checkpoint();
-                    if let Some(n) = self.graph.node_mut(node) {
+                    if let Some(n) = self.doc.graph.node_mut(node) {
                         n.values.insert(pin, Value::Bool(!b));
                     }
                 } else {
@@ -236,28 +205,28 @@ impl Editor {
             }
             Hit::Header(id) | Hit::Body(id) => {
                 if additive {
-                    if !self.selected.remove(&id) {
-                        self.selected.insert(id);
+                    if !self.doc.selected.remove(&id) {
+                        self.doc.selected.insert(id);
                     }
-                } else if !self.selected.contains(&id) {
-                    self.selected.clear();
-                    self.selected.insert(id);
+                } else if !self.doc.selected.contains(&id) {
+                    self.doc.selected.clear();
+                    self.doc.selected.insert(id);
                 }
                 self.bring_to_front(id);
-                self.drag = Drag::Nodes { last: g, before: self.graph.clone(), moved: false };
+                self.canvas.drag = Drag::Nodes { last: g, before: self.doc.graph.clone(), moved: false };
             }
             Hit::Empty => {
                 if !additive {
-                    self.selected.clear();
+                    self.doc.selected.clear();
                 }
-                self.drag = Drag::Select { start: g, cursor: g, additive };
+                self.canvas.drag = Drag::Select { start: g, cursor: g, additive };
             }
         }
     }
 
     pub fn right_down(&mut self, local: V2) {
         self.commit_edit();
-        self.menu = None;
+        self.canvas.menu = None;
         let g = self.to_graph(local);
         let layouts = self.layouts();
         let on_node = match layout::hit_test(&layouts, g) {
@@ -265,31 +234,31 @@ impl Editor {
             Hit::Pin(..) | Hit::Empty => None,
         };
         if let Some(id) = on_node
-            && !self.selected.contains(&id)
+            && !self.doc.selected.contains(&id)
         {
-            self.selected.clear();
-            self.selected.insert(id);
+            self.doc.selected.clear();
+            self.doc.selected.insert(id);
         }
-        self.drag = Drag::Pan { last: local, moved: false, opens_menu: on_node.is_none() };
+        self.canvas.drag = Drag::Pan { last: local, moved: false, opens_menu: on_node.is_none() };
     }
 
     pub fn middle_down(&mut self, local: V2) {
-        self.drag = Drag::Pan { last: local, moved: false, opens_menu: false };
+        self.canvas.drag = Drag::Pan { last: local, moved: false, opens_menu: false };
     }
 
     pub fn mouse_move(&mut self, local: V2, any_button_held: bool) -> bool {
-        self.mouse = local;
+        self.canvas.mouse = local;
         let hover = layout::hit_test(&self.layouts(), self.to_graph(local));
-        let hover_changed = hover != self.hover;
-        self.hover = hover;
-        if !any_button_held && !matches!(self.drag, Drag::None) {
+        let hover_changed = hover != self.canvas.hover;
+        self.canvas.hover = hover;
+        if !any_button_held && !matches!(self.canvas.drag, Drag::None) {
             // The button went up somewhere we didn't see, such as outside the window: keep what
             // the drag already changed, but don't act on a drop we didn't see.
             self.end_drag(None);
             return true;
         }
         let g = self.to_graph(local);
-        match &mut self.drag {
+        match &mut self.canvas.drag {
             Drag::None => return hover_changed,
             Drag::Pan { last, moved, .. } => {
                 let delta = local - *last;
@@ -297,14 +266,14 @@ impl Editor {
                     *moved = true;
                 }
                 *last = local;
-                self.pan = self.pan + delta;
+                self.doc.pan = self.doc.pan + delta;
             }
             Drag::Nodes { last, moved, .. } => {
                 let delta = g - *last;
                 *last = g;
                 *moved = true;
-                let selected = self.selected.clone();
-                for node in self.graph.nodes.iter_mut().filter(|n| selected.contains(&n.id)) {
+                let selected = self.doc.selected.clone();
+                for node in self.doc.graph.nodes.iter_mut().filter(|n| selected.contains(&n.id)) {
                     node.x += delta.x;
                     node.y += delta.y;
                 }
@@ -323,7 +292,7 @@ impl Editor {
     /// recorded, but nothing that depends on the drop point happens (linking, the menu, the
     /// selection box).
     pub fn end_drag(&mut self, drop: Option<V2>) {
-        match std::mem::replace(&mut self.drag, Drag::None) {
+        match std::mem::replace(&mut self.canvas.drag, Drag::None) {
             Drag::None => {}
             Drag::Pan { moved, opens_menu, .. } => {
                 if let Some(local) = drop
@@ -335,19 +304,19 @@ impl Editor {
             }
             Drag::Nodes { before, moved, .. } => {
                 if moved {
-                    self.history.record(before);
+                    self.doc.history.record(before);
                 }
             }
             Drag::Wire { anchor, side, before, .. } => {
                 // A picked-up wire already changed the graph; a new one hasn't yet.
                 let picked_up = before.is_some();
-                let before = before.unwrap_or_else(|| self.graph.clone());
+                let before = before.unwrap_or_else(|| self.doc.graph.clone());
                 let linked = match drop {
                     Some(local) => self.drop_wire(local, anchor, side),
                     None => false,
                 };
                 if linked || picked_up {
-                    self.history.record(before);
+                    self.doc.history.record(before);
                 }
             }
             Drag::Select { .. } if drop.is_none() => {}
@@ -355,11 +324,11 @@ impl Editor {
                 let area = Rect::from_points(start, cursor);
                 if area.w() > 2.0 || area.h() > 2.0 {
                     if !additive {
-                        self.selected.clear();
+                        self.doc.selected.clear();
                     }
                     for l in self.layouts() {
                         if l.rect.intersects(&area) {
-                            self.selected.insert(l.id);
+                            self.doc.selected.insert(l.id);
                         }
                     }
                 }
@@ -377,11 +346,11 @@ impl Editor {
                     Side::Output => (anchor, target),
                     Side::Input => (target, anchor),
                 };
-                if self.graph.can_link(&from, &to) {
-                    self.graph.link(from, to);
+                if self.doc.graph.can_link(&from, &to) {
+                    self.doc.graph.link(from, to);
                     return true;
                 }
-                self.status = "Those pins don't fit together".into();
+                self.chrome.status = "Those pins don't fit together".into();
             }
             Hit::Empty => self.open_menu(local, Some((anchor, side))),
             _ => {}
@@ -391,14 +360,14 @@ impl Editor {
 
     pub fn scroll(&mut self, local: V2, dy: f32) {
         let before = self.to_graph(local);
-        self.zoom = (self.zoom * 1.0015f32.powf(dy)).clamp(MIN_ZOOM, MAX_ZOOM);
-        self.pan = local - before * self.zoom;
+        self.doc.zoom = (self.doc.zoom * 1.0015f32.powf(dy)).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.doc.pan = local - before * self.doc.zoom;
     }
 
     fn bring_to_front(&mut self, id: NodeId) {
-        if let Some(i) = self.graph.nodes.iter().position(|n| n.id == id) {
-            let node = self.graph.nodes.remove(i);
-            self.graph.nodes.push(node);
+        if let Some(i) = self.doc.graph.nodes.iter().position(|n| n.id == id) {
+            let node = self.doc.graph.nodes.remove(i);
+            self.doc.graph.nodes.push(node);
         }
     }
 
@@ -406,23 +375,23 @@ impl Editor {
 
     pub fn open_menu(&mut self, local: V2, wire: Option<(PinRef, Side)>) {
         // A preview run may have taught the project new components since.
-        if let Some(project) = &self.project {
+        if let Some(project) = &self.workspace.project {
             let _ = vs_graph::components::load_project(&project.root);
         }
-        let (_, size) = self.canvas.get();
+        let (_, size) = self.canvas.bounds.get();
         let at = V2::new(local.x.min(size.x - 270.0).max(4.0), local.y.min(size.y - 420.0).max(4.0));
-        self.menu =
+        self.canvas.menu =
             Some(Menu { at, graph_at: self.to_graph(local), filter: String::new(), highlight: 0, wire });
     }
 
     /// The menu rows that match the filter and, when a wire opened the menu, can take it.
     pub fn menu_entries(&self) -> Vec<MenuEntry> {
-        let Some(menu) = &self.menu else { return Vec::new() };
+        let Some(menu) = &self.canvas.menu else { return Vec::new() };
         let filter = menu.filter.to_lowercase();
         let mut entries = Vec::new();
         for def in library::all() {
             if def.is_variable() {
-                for var in &self.graph.variables {
+                for var in &self.doc.graph.variables {
                     entries.push(MenuEntry {
                         kind: def.kind,
                         var: Some(var.name.clone()),
@@ -465,7 +434,7 @@ impl Editor {
 
     /// The pin on a would-be node of `entry` that a wire from `pin` would plug into.
     fn fits(&self, entry: &MenuEntry, pin: &PinRef, side: Side) -> Option<String> {
-        let ty = self.graph.pin(pin, side)?.ty;
+        let ty = self.doc.graph.pin(pin, side)?.ty;
         let probe = vs_graph::Node {
             id: 0,
             kind: entry.kind.to_string(),
@@ -476,7 +445,7 @@ impl Editor {
             field: entry.field.clone(),
             name: None,
         };
-        let pins = self.graph.pins_of(&probe);
+        let pins = self.doc.graph.pins_of(&probe);
         let candidates = match side {
             Side::Output => pins.inputs,
             Side::Input => pins.outputs,
@@ -491,7 +460,7 @@ impl Editor {
     }
 
     pub fn place(&mut self, entry: &MenuEntry) {
-        let Some(menu) = self.menu.take() else { return };
+        let Some(menu) = self.canvas.menu.take() else { return };
         self.checkpoint();
         let mut at = menu.graph_at;
         if let Some((_, Side::Input)) = &menu.wire {
@@ -499,20 +468,20 @@ impl Editor {
             at.x -= layout::NODE_W;
         }
         let id = match &entry.field {
-            Some(field) => self.graph.add_field_node(entry.kind, field, at.x, at.y),
-            None => self.graph.add_node(entry.kind, entry.var.clone(), at.x, at.y),
+            Some(field) => self.doc.graph.add_field_node(entry.kind, field, at.x, at.y),
+            None => self.doc.graph.add_node(entry.kind, entry.var.clone(), at.x, at.y),
         };
         if let Some((pin, side)) = menu.wire
             && let Some(target) = self.fits(entry, &pin, side)
         {
             let new_pin = PinRef::new(id, target);
             match side {
-                Side::Output => self.graph.link(pin, new_pin),
-                Side::Input => self.graph.link(new_pin, pin),
+                Side::Output => self.doc.graph.link(pin, new_pin),
+                Side::Input => self.doc.graph.link(new_pin, pin),
             };
         }
-        self.selected.clear();
-        self.selected.insert(id);
+        self.doc.selected.clear();
+        self.doc.selected.insert(id);
     }
 
     // Inline editing ---------------------------------------------------------------------------
@@ -521,14 +490,14 @@ impl Editor {
         let Some(edit) = self.editing.take() else { return };
         match edit.target {
             EditTarget::Field(node, pin) => {
-                let current = self.graph.node(node).and_then(|n| n.values.get(&pin)).cloned();
+                let current = self.doc.graph.node(node).and_then(|n| n.values.get(&pin)).cloned();
                 let Some(value) = current.and_then(|c| c.parse_like(&edit.buffer)) else {
-                    self.status = format!("`{}` isn't a valid value", edit.buffer);
+                    self.chrome.status = format!("`{}` isn't a valid value", edit.buffer);
                     return;
                 };
-                if self.graph.node(node).and_then(|n| n.values.get(&pin)) != Some(&value) {
+                if self.doc.graph.node(node).and_then(|n| n.values.get(&pin)) != Some(&value) {
                     self.checkpoint();
-                    if let Some(n) = self.graph.node_mut(node) {
+                    if let Some(n) = self.doc.graph.node_mut(node) {
                         n.values.insert(pin, value);
                     }
                 }
@@ -536,40 +505,40 @@ impl Editor {
             EditTarget::NodeName(id) => {
                 let name = vs_graph::lower::snake_case(edit.buffer.trim());
                 let name = (!name.is_empty()).then_some(name);
-                if self.graph.node(id).is_some_and(|n| n.name != name) {
+                if self.doc.graph.node(id).is_some_and(|n| n.name != name) {
                     self.checkpoint();
-                    if let Some(n) = self.graph.node_mut(id) {
+                    if let Some(n) = self.doc.graph.node_mut(id) {
                         n.name = name;
                     }
                 }
             }
             EditTarget::VarName(i) => {
                 let name = edit.buffer.trim().to_string();
-                let Some(old) = self.graph.variables.get(i).map(|v| v.name.clone()) else { return };
+                let Some(old) = self.doc.graph.variables.get(i).map(|v| v.name.clone()) else { return };
                 if name == old {
                     return;
                 }
-                if name.is_empty() || self.graph.variable(&name).is_some() {
-                    self.status = format!("A variable needs a unique name, `{name}` isn't one");
+                if name.is_empty() || self.doc.graph.variable(&name).is_some() {
+                    self.chrome.status = format!("A variable needs a unique name, `{name}` isn't one");
                     return;
                 }
                 self.checkpoint();
-                self.graph.variables[i].name = name.clone();
-                for n in &mut self.graph.nodes {
+                self.doc.graph.variables[i].name = name.clone();
+                for n in &mut self.doc.graph.nodes {
                     if n.var.as_deref() == Some(old.as_str()) {
                         n.var = Some(name.clone());
                     }
                 }
             }
             EditTarget::VarValue(i) => {
-                let Some(var) = self.graph.variables.get(i) else { return };
+                let Some(var) = self.doc.graph.variables.get(i) else { return };
                 match var.value.parse_like(&edit.buffer) {
                     Some(value) if value != var.value => {
                         self.checkpoint();
-                        self.graph.variables[i].value = value;
+                        self.doc.graph.variables[i].value = value;
                     }
                     Some(_) => {}
-                    None => self.status = format!("`{}` isn't a valid value", edit.buffer),
+                    None => self.chrome.status = format!("`{}` isn't a valid value", edit.buffer),
                 }
             }
         }
@@ -579,17 +548,17 @@ impl Editor {
         self.commit_edit();
         let buffer = match &target {
             EditTarget::Field(node, pin) => self
-                .graph
+                .doc.graph
                 .node(*node)
                 .and_then(|n| n.values.get(pin))
                 .map(Value::display)
                 .unwrap_or_default(),
-            EditTarget::NodeName(id) => self.graph.node(*id).and_then(|n| n.name.clone()).unwrap_or_default(),
+            EditTarget::NodeName(id) => self.doc.graph.node(*id).and_then(|n| n.name.clone()).unwrap_or_default(),
             EditTarget::VarName(i) => {
-                self.graph.variables.get(*i).map(|v| v.name.clone()).unwrap_or_default()
+                self.doc.graph.variables.get(*i).map(|v| v.name.clone()).unwrap_or_default()
             }
             EditTarget::VarValue(i) => {
-                self.graph.variables.get(*i).map(|v| v.value.display()).unwrap_or_default()
+                self.doc.graph.variables.get(*i).map(|v| v.value.display()).unwrap_or_default()
             }
         };
         self.editing = Some(Editing { target, buffer });
@@ -599,32 +568,32 @@ impl Editor {
 
     pub fn add_variable(&mut self) {
         self.checkpoint();
-        let mut n = self.graph.variables.len() + 1;
-        while self.graph.variable(&format!("var{n}")).is_some() {
+        let mut n = self.doc.graph.variables.len() + 1;
+        while self.doc.graph.variable(&format!("var{n}")).is_some() {
             n += 1;
         }
-        self.graph.variables.push(Variable { name: format!("var{n}"), value: Value::Number(0.0) });
+        self.doc.graph.variables.push(Variable { name: format!("var{n}"), value: Value::Number(0.0) });
     }
 
     pub fn remove_variable(&mut self, i: usize) {
-        let Some(name) = self.graph.variables.get(i).map(|v| v.name.clone()) else { return };
+        let Some(name) = self.doc.graph.variables.get(i).map(|v| v.name.clone()) else { return };
         self.checkpoint();
-        self.graph.variables.remove(i);
+        self.doc.graph.variables.remove(i);
         let ids: Vec<NodeId> = self
-            .graph
+            .doc.graph
             .nodes
             .iter()
             .filter(|n| n.var.as_deref() == Some(name.as_str()))
             .map(|n| n.id)
             .collect();
-        self.graph.remove_nodes(&ids);
+        self.doc.graph.remove_nodes(&ids);
         self.editing = None;
     }
 
     /// Number → Bool → String → Vector → Rotation → Color → Number. Set nodes get a fresh inline
     /// value of the new type.
     pub fn cycle_variable_type(&mut self, i: usize) {
-        let Some(var) = self.graph.variables.get(i) else { return };
+        let Some(var) = self.doc.graph.variables.get(i) else { return };
         let ty = match var.value.ty() {
             PinType::Number => PinType::Bool,
             PinType::Bool => PinType::String,
@@ -636,83 +605,83 @@ impl Editor {
         let value = Value::default_for(ty).expect("data types have defaults");
         let name = var.name.clone();
         self.checkpoint();
-        self.graph.variables[i].value = value;
-        for n in &mut self.graph.nodes {
+        self.doc.graph.variables[i].value = value;
+        for n in &mut self.doc.graph.nodes {
             if n.var.as_deref() == Some(name.as_str()) && n.kind == "var.set" {
                 if let Some(v) = Value::default_for(ty) {
                     n.values.insert("value".into(), v);
                 }
             }
         }
-        self.graph.prune_links();
+        self.doc.graph.prune_links();
     }
 
     pub fn add_variable_node(&mut self, i: usize, kind: &'static str) {
-        let Some(name) = self.graph.variables.get(i).map(|v| v.name.clone()) else { return };
-        let (_, size) = self.canvas.get();
+        let Some(name) = self.doc.graph.variables.get(i).map(|v| v.name.clone()) else { return };
+        let (_, size) = self.canvas.bounds.get();
         let at = self.to_graph(size * 0.5) - V2::new(layout::NODE_W * 0.5, 30.0);
         self.checkpoint();
-        let id = self.graph.add_node(kind, Some(name), at.x, at.y);
-        self.selected.clear();
-        self.selected.insert(id);
+        let id = self.doc.graph.add_node(kind, Some(name), at.x, at.y);
+        self.doc.selected.clear();
+        self.doc.selected.insert(id);
     }
 
     // Selection --------------------------------------------------------------------------------
 
     pub fn delete_selected(&mut self) {
-        if self.selected.is_empty() {
+        if self.doc.selected.is_empty() {
             return;
         }
         self.checkpoint();
-        let ids: Vec<NodeId> = self.selected.iter().copied().collect();
-        self.graph.remove_nodes(&ids);
-        self.selected.clear();
+        let ids: Vec<NodeId> = self.doc.selected.iter().copied().collect();
+        self.doc.graph.remove_nodes(&ids);
+        self.doc.selected.clear();
     }
 
     pub fn duplicate_selected(&mut self) {
-        if self.selected.is_empty() {
+        if self.doc.selected.is_empty() {
             return;
         }
         self.checkpoint();
-        let ids: Vec<NodeId> = self.selected.iter().copied().collect();
-        let copies = self.graph.duplicate(&ids, 30.0, 30.0);
-        self.selected = copies.into_iter().collect();
+        let ids: Vec<NodeId> = self.doc.selected.iter().copied().collect();
+        let copies = self.doc.graph.duplicate(&ids, 30.0, 30.0);
+        self.doc.selected = copies.into_iter().collect();
     }
 
     /// Fits the selection, or the whole graph, in the canvas.
     pub fn frame(&mut self) {
         let layouts = self.layouts();
-        let pick: Vec<&NodeLayout> = if self.selected.is_empty() {
+        let pick: Vec<&NodeLayout> = if self.doc.selected.is_empty() {
             layouts.iter().collect()
         } else {
-            layouts.iter().filter(|l| self.selected.contains(&l.id)).collect()
+            layouts.iter().filter(|l| self.doc.selected.contains(&l.id)).collect()
         };
         let Some(first) = pick.first() else { return };
         let bounds = pick.iter().fold(first.rect, |acc, l| acc.union(&l.rect));
-        let (_, size) = self.canvas.get();
+        let (_, size) = self.canvas.bounds.get();
         let margin = 60.0;
         let zoom = ((size.x - margin * 2.0) / bounds.w())
             .min((size.y - margin * 2.0) / bounds.h())
             .clamp(MIN_ZOOM, 1.2);
-        self.zoom = zoom;
+        self.doc.zoom = zoom;
         let center = V2::new(bounds.min.x + bounds.w() * 0.5, bounds.min.y + bounds.h() * 0.5);
-        self.pan = size * 0.5 - center * zoom;
+        self.doc.pan = size * 0.5 - center * zoom;
     }
 
     pub fn focus_node(&mut self, id: NodeId) {
-        self.selected.clear();
-        self.selected.insert(id);
-        if let Some(node) = self.graph.node(id) {
-            let (_, size) = self.canvas.get();
+        self.doc.selected.clear();
+        self.doc.selected.insert(id);
+        if let Some(node) = self.doc.graph.node(id) {
+            let (_, size) = self.canvas.bounds.get();
             let center = V2::new(node.x + layout::NODE_W * 0.5, node.y + 40.0);
-            self.pan = size * 0.5 - center * self.zoom;
+            self.doc.pan = size * 0.5 - center * self.doc.zoom;
         }
     }
 
     // Files ------------------------------------------------------------------------------------
 
     pub fn confirm_discard(&self) -> bool {
-        !self.history.is_dirty()
+        !self.doc.history.is_dirty()
             || rfd::MessageDialog::new()
                 .set_title("Unsaved changes")
                 .set_description("The current graph has unsaved changes. Discard them?")
@@ -725,35 +694,21 @@ impl Editor {
         if !self.confirm_discard() {
             return;
         }
-        *self = Self { graph: Graph::default(), path: None, ..self.reset() };
+        self.reset(Graph::default(), None);
         self.update_title(window);
     }
 
-    /// A fresh state that keeps the window's handles.
-    pub fn reset(&self) -> Self {
-        Self {
-            graph: Graph::default(),
-            path: None,
-            pan: V2::new(60.0, 60.0),
-            zoom: 1.0,
-            selected: BTreeSet::new(),
-            drag: Drag::None,
-            menu: None,
-            editing: None,
-            history: History::default(),
-            focus: self.focus.clone(),
-            show_bottom_panel: self.show_bottom_panel,
-            bottom_tab: self.bottom_tab,
-            status: String::new(),
-            mouse: self.mouse,
-            hover: Hit::Empty,
-            canvas: self.canvas.clone(),
-            config: self.config.clone(),
-            project: self.project.clone(),
-            dialog: None,
-            code_view: self.code_view,
-            task: self.task.clone(),
-        }
+    /// Replaces the open document with `graph` and clears everything that pointed into the old
+    /// one: the drag, the menu, the hover, the text edit, the dialog and the status line. The
+    /// workspace, the panels' layout and the canvas bounds stay.
+    pub fn reset(&mut self, graph: Graph, path: Option<PathBuf>) {
+        self.doc = Document { graph, path, ..Document::default() };
+        self.canvas.drag = Drag::None;
+        self.canvas.menu = None;
+        self.canvas.hover = Hit::Empty;
+        self.editing = None;
+        self.chrome.status = String::new();
+        self.chrome.dialog = None;
     }
 
     pub fn open(&mut self, window: &mut Window) {
@@ -761,7 +716,7 @@ impl Editor {
             return;
         }
         let mut dialog = rfd::FileDialog::new().add_filter("Visual script", &["lua"]).set_title("Open visual script");
-        if let Some(project) = &self.project {
+        if let Some(project) = &self.workspace.project {
             dialog = dialog.set_directory(project.scripts_dir());
         }
         if let Some(path) = dialog.pick_file() {
@@ -777,26 +732,26 @@ impl Editor {
             .and_then(|s| vs_graph::load_from_str(&s).map_err(|e| e.to_string()))
         {
             Ok(graph) => {
-                let project = vs_project::Project::containing(&path).or_else(|| self.project.clone());
-                *self = Self { graph, path: Some(path.clone()), ..self.reset() };
+                let project = vs_project::Project::containing(&path).or_else(|| self.workspace.project.clone());
+                self.reset(graph, Some(path.clone()));
                 // Always reload, even for the same project: a preview may have rewritten its catalog.
                 let catalog = match project {
                     Some(project) => self.set_project(project),
                     None => Ok(()),
                 };
                 self.frame();
-                self.status = match catalog {
+                self.chrome.status = match catalog {
                     Ok(()) => format!("Opened {}", path.display()),
                     Err(e) => format!("Opened {}, but {e}", path.display()),
                 };
                 self.update_title(window);
             }
-            Err(e) => self.status = format!("Couldn't open {}: {e}", path.display()),
+            Err(e) => self.chrome.status = format!("Couldn't open {}: {e}", path.display()),
         }
     }
 
     pub fn save(&mut self, window: &mut Window) {
-        match self.path.clone() {
+        match self.doc.path.clone() {
             Some(path) => self.write(path, window),
             None => self.save_as(window),
         }
@@ -816,26 +771,26 @@ impl Editor {
 
     fn write(&mut self, path: PathBuf, window: &mut Window) {
         self.commit_edit();
-        match std::fs::write(&path, vs_graph::save_to_string(&self.graph)) {
+        match std::fs::write(&path, vs_graph::save_to_string(&self.doc.graph)) {
             Ok(()) => {
-                self.status = format!("Saved {}", path.display());
-                self.path = Some(path);
-                self.history.mark_saved();
+                self.chrome.status = format!("Saved {}", path.display());
+                self.doc.path = Some(path);
+                self.doc.history.mark_saved();
                 self.update_title(window);
             }
-            Err(e) => self.status = format!("Couldn't save {}: {e}", path.display()),
+            Err(e) => self.chrome.status = format!("Couldn't save {}: {e}", path.display()),
         }
     }
 
     pub fn file_name(&self) -> String {
-        self.path
+        self.doc.path
             .as_ref()
             .and_then(|p| p.file_name())
             .map_or("untitled.lua".into(), |n| n.to_string_lossy().into_owned())
     }
 
     pub fn update_title(&self, window: &mut Window) {
-        let project = self.project.as_ref().map(|p| format!(" ({})", p.name)).unwrap_or_default();
+        let project = self.workspace.project.as_ref().map(|p| format!(" ({})", p.name)).unwrap_or_default();
         window.set_window_title(&format!("{}{project} - Bevy Visual Script Editor", self.file_name()));
     }
 
@@ -847,7 +802,7 @@ impl Editor {
         let key = ks.key.as_str();
         let typed = ks.key_char.clone().filter(|_| !ctrl);
 
-        if self.dialog.is_some() {
+        if self.chrome.dialog.is_some() {
             self.dialog_key(key, typed, window);
             return;
         }
@@ -868,16 +823,16 @@ impl Editor {
             return;
         }
 
-        if self.menu.is_some() {
+        if self.canvas.menu.is_some() {
             let count = self.menu_entries().len();
-            let menu = self.menu.as_mut().unwrap();
+            let menu = self.canvas.menu.as_mut().unwrap();
             match key {
-                "escape" => self.menu = None,
+                "escape" => self.canvas.menu = None,
                 "up" => menu.highlight = menu.highlight.saturating_sub(1),
                 "down" => menu.highlight = (menu.highlight + 1).min(count.saturating_sub(1)),
                 "enter" => {
                     let entries = self.menu_entries();
-                    let pick = self.menu.as_ref().map_or(0, |m| m.highlight);
+                    let pick = self.canvas.menu.as_ref().map_or(0, |m| m.highlight);
                     if let Some(entry) = entries.get(pick) {
                         self.place(&entry.clone());
                     }
@@ -899,7 +854,7 @@ impl Editor {
         // Shortcuts with a menu item are actions (see actions.rs); these are the extra keys.
         match (ctrl, key) {
             (false, "backspace") => self.delete_selected(),
-            (false, "space") => self.open_menu(self.mouse, None),
+            (false, "space") => self.open_menu(self.canvas.mouse, None),
             _ => {}
         }
     }

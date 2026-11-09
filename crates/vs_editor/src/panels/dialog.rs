@@ -11,7 +11,7 @@ use crate::ui::{button, field};
 
 impl Editor {
     pub(crate) fn dialog_element(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let dialog = self.dialog.as_ref().expect("checked by the caller");
+        let dialog = self.chrome.dialog.as_ref().expect("checked by the caller");
         let body = match dialog {
             Dialog::Settings => div()
                 .flex()
@@ -25,7 +25,7 @@ impl Editor {
                         .gap_2()
                         .items_center()
                         .child(
-                            field("projects-dir".into(), self.config.projects_dir.display().to_string(), false, cx)
+                            field("projects-dir".into(), self.workspace.config.projects_dir.display().to_string(), false, cx)
                                 .flex_1(),
                         )
                         .child(button("change-dir", "Change…", cx).on_click(cx.listener(|this, _, _, cx| {
@@ -43,7 +43,7 @@ impl Editor {
                 let (title, hint) = match dialog {
                     Dialog::NewProject { .. } => (
                         "New project",
-                        format!("It goes in {}", self.config.projects_dir.display()),
+                        format!("It goes in {}", self.workspace.config.projects_dir.display()),
                     ),
                     _ => ("New script", "It becomes a component you can put on entities".to_string()),
                 };
@@ -72,7 +72,7 @@ impl Editor {
             .bg(rgba(0x0000_0088))
             .occlude()
             .on_click(cx.listener(|this, _, _, cx| {
-                this.dialog = None;
+                this.chrome.dialog = None;
                 cx.notify();
             }))
             .child(
@@ -97,14 +97,14 @@ impl Editor {
                             .gap_2()
                             .when(confirm != "Close", |d| {
                                 d.child(button("dialog-cancel", "Cancel", cx).on_click(cx.listener(|this, _, _, cx| {
-                                    this.dialog = None;
+                                    this.chrome.dialog = None;
                                     cx.notify();
                                 })))
                             })
                             .child(button("dialog-ok", confirm, cx).bg(theme::primary(cx).0).text_color(theme::primary(cx).1).on_click(cx.listener(
                                 |this, _, window, cx| {
-                                    match this.dialog {
-                                        Some(Dialog::Settings) => this.dialog = None,
+                                    match this.chrome.dialog {
+                                        Some(Dialog::Settings) => this.chrome.dialog = None,
                                         _ => this.confirm_dialog(window),
                                     }
                                     cx.notify();

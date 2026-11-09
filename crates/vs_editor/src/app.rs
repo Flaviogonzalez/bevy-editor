@@ -16,7 +16,7 @@ use crate::theme;
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = window;
-        let compiled = vs_graph::compile(&self.graph);
+        let compiled = vs_graph::compile(&self.doc.graph);
         let layouts = self.layouts();
 
         actions::register(div(), cx)
@@ -57,7 +57,7 @@ impl Render for Editor {
                                             .size(px(240.0))
                                             .size_range(px(120.0)..px(600.0))
                                             .fixed()
-                                            .visible(self.show_bottom_panel)
+                                            .visible(self.chrome.show_bottom_panel)
                                             .child(self.bottom_panel(&compiled, cx)),
                                     ),
                             ),
@@ -71,7 +71,7 @@ impl Render for Editor {
                         ),
                 ),
             )
-            .when(self.dialog.is_some(), |d| d.child(self.dialog_element(cx)))
+            .when(self.chrome.dialog.is_some(), |d| d.child(self.dialog_element(cx)))
             .child(
                 div()
                     .h(px(24.0))
@@ -83,7 +83,7 @@ impl Render for Editor {
                     .border_color(theme::border(cx))
                     .text_size(px(12.0))
                     .text_color(theme::dim(cx))
-                    .child(self.status.clone()),
+                    .child(self.chrome.status.clone()),
             )
     }
 }

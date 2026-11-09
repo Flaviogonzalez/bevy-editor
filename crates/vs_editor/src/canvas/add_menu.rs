@@ -11,7 +11,7 @@ use super::MENU_ROWS;
 
 impl Editor {
     pub(super) fn menu_element(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let menu = self.menu.as_ref().expect("checked by the caller");
+        let menu = self.canvas.menu.as_ref().expect("checked by the caller");
         let entries = self.menu_entries();
         let start = menu.highlight.saturating_sub(MENU_ROWS - 1);
         let rows = entries.iter().enumerate().skip(start).take(MENU_ROWS).map(|(i, entry)| {
@@ -63,7 +63,7 @@ impl Editor {
             .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| {
                 cx.stop_propagation();
                 let count = this.menu_entries().len();
-                if let Some(menu) = &mut this.menu {
+                if let Some(menu) = &mut this.canvas.menu {
                     let dy = e.delta.pixel_delta(px(20.0)).y.as_f32();
                     menu.highlight = if dy < 0.0 {
                         (menu.highlight + 1).min(count.saturating_sub(1))

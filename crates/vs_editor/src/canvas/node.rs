@@ -18,8 +18,8 @@ impl Editor {
     /// being dragged (an incompatible pin, or one on the same side as the wire's anchor).
     fn pin_look(&self, node: NodeId, pin: &str, side: Side) -> PinLook {
         let me = PinRef::new(node, pin.to_string());
-        let hovered = self.hover == Hit::Pin(me.clone(), side);
-        let dimmed = match &self.drag {
+        let hovered = self.canvas.hover == Hit::Pin(me.clone(), side);
+        let dimmed = match &self.canvas.drag {
             Drag::Wire { anchor, side: anchor_side, .. } => {
                 if *anchor == me && *anchor_side == side {
                     false
@@ -27,8 +27,8 @@ impl Editor {
                     true
                 } else {
                     match side {
-                        Side::Input => !self.graph.can_link(anchor, &me),
-                        Side::Output => !self.graph.can_link(&me, anchor),
+                        Side::Input => !self.doc.graph.can_link(anchor, &me),
+                        Side::Output => !self.doc.graph.can_link(&me, anchor),
                     }
                 }
             }
@@ -41,16 +41,16 @@ impl Editor {
     /// the pin's dot on the card's edge, its name, and an inline field for unconnected values.
     /// Selection draws a ring around the card, so the border stays free to show problems.
     pub(super) fn node_element(&self, node: &vs_graph::Node, l: &NodeLayout, flag: Option<Severity>, cx: &App) -> Div {
-        let z = self.zoom;
+        let z = self.doc.zoom;
         let def = library::find(&node.kind);
         let (title, subject) = match (node.var.as_ref().or(node.field.as_ref()), def) {
             (subject, Some(d)) => (d.title.to_string(), subject.cloned()),
             _ => (format!("? {}", node.kind), None),
         };
         let accent: Hsla = theme::category(def.map_or("", |d| d.category)).into();
-        let selected = self.selected.contains(&node.id);
-        let hovered = matches!(&self.hover, Hit::Header(id) | Hit::Body(id) | Hit::Field(id, _) if *id == node.id)
-            && matches!(self.drag, Drag::None);
+        let selected = self.doc.selected.contains(&node.id);
+        let hovered = matches!(&self.canvas.hover, Hit::Header(id) | Hit::Body(id) | Hit::Field(id, _) if *id == node.id)
+            && matches!(self.canvas.drag, Drag::None);
         let flag_color = flag.map(|f| if f == Severity::Error { theme::error(cx) } else { theme::warning(cx) });
         let border = match (flag_color, selected, hovered) {
             (Some(c), _, _) => c,
@@ -181,7 +181,7 @@ impl Editor {
         for (pin, rect) in &l.fields {
             let value = node.values.get(pin);
             let editing = self.editing.as_ref().filter(|e| e.target == EditTarget::Field(node.id, pin.clone()));
-            let field_hovered = self.hover == Hit::Field(node.id, pin.clone()) && matches!(self.drag, Drag::None);
+            let field_hovered = self.canvas.hover == Hit::Field(node.id, pin.clone()) && matches!(self.canvas.drag, Drag::None);
             let text = match (editing, value) {
                 (Some(e), _) => format!("{}|", e.buffer),
                 (None, Some(Value::Str(s))) => format!("\"{s}\""),

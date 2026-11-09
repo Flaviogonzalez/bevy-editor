@@ -74,7 +74,7 @@ pub fn bind_keys(cx: &mut App) {
 impl Editor {
     /// Whether something other than the canvas owns the keyboard right now.
     fn keyboard_taken(&self) -> bool {
-        self.dialog.is_some() || self.editing.is_some() || self.menu.is_some()
+        self.chrome.dialog.is_some() || self.editing.is_some() || self.canvas.menu.is_some()
     }
 }
 
@@ -107,29 +107,29 @@ pub fn register<E: InteractiveElement>(el: E, cx: &mut Context<Editor>) -> E {
     let el = on::<Redo, _>(el, cx, |e, _, _| e.redo());
     let el = on::<Duplicate, _>(el, cx, |e, _, _| e.duplicate_selected());
     let el = on::<Delete, _>(el, cx, |e, _, _| e.delete_selected());
-    let el = on::<SelectAll, _>(el, cx, |e, _, _| e.selected = e.graph.nodes.iter().map(|n| n.id).collect());
-    let el = on::<AddNode, _>(el, cx, |e, _, _| e.open_menu(e.mouse, None));
+    let el = on::<SelectAll, _>(el, cx, |e, _, _| e.doc.selected = e.doc.graph.nodes.iter().map(|n| n.id).collect());
+    let el = on::<AddNode, _>(el, cx, |e, _, _| e.open_menu(e.canvas.mouse, None));
     let el = on::<FrameAll, _>(el, cx, |e, _, _| e.frame());
-    let el = on::<ToggleBottomPanel, _>(el, cx, |e, _, _| e.show_bottom_panel = !e.show_bottom_panel);
+    let el = on::<ToggleBottomPanel, _>(el, cx, |e, _, _| e.chrome.show_bottom_panel = !e.chrome.show_bottom_panel);
     // The project commands do nothing without a project, as their menu items are disabled then.
     let el = on::<Preview, _>(el, cx, |e, w, cx| {
-        if e.project.is_some() {
+        if e.workspace.project.is_some() {
             e.run_preview(w, cx)
         }
     });
     let el = on::<Build, _>(el, cx, |e, w, cx| {
-        if e.project.is_some() {
+        if e.workspace.project.is_some() {
             e.build(w, cx)
         }
     });
     let el = on::<Stop, _>(el, cx, |e, _, _| e.stop_task());
     let el = on::<RefreshCatalog, _>(el, cx, |e, _, cx| {
-        if e.project.is_some() {
+        if e.workspace.project.is_some() {
             e.refresh_catalog(cx)
         }
     });
     on::<EditCatalog, _>(el, cx, |e, _, _| {
-        if e.project.is_some() {
+        if e.workspace.project.is_some() {
             e.edit_catalog()
         }
     })

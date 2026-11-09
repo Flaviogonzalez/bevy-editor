@@ -21,15 +21,15 @@ impl Editor {
 
     fn node_details(&self, cx: &mut Context<Self>) -> Div {
         let hint = |text: String| div().px_3().py_3().text_color(theme::dim(cx)).child(text);
-        let id = match self.selected.iter().next() {
-            Some(id) if self.selected.len() == 1 => *id,
-            Some(_) => return hint(format!("{} nodes selected", self.selected.len())),
+        let id = match self.doc.selected.iter().next() {
+            Some(id) if self.doc.selected.len() == 1 => *id,
+            Some(_) => return hint(format!("{} nodes selected", self.doc.selected.len())),
             None => return hint("Select a node to see what it does.".into()),
         };
-        let Some((node, def)) = self.graph.node(id).and_then(|n| library::find(&n.kind).map(|d| (n, d))) else {
+        let Some((node, def)) = self.doc.graph.node(id).and_then(|n| library::find(&n.kind).map(|d| (n, d))) else {
             return hint("Unknown node".into());
         };
-        let pins = self.graph.pins_of(node);
+        let pins = self.doc.graph.pins_of(node);
         let pin_row = |p: &vs_graph::library::PinDef| {
             div()
                 .h(px(24.0))

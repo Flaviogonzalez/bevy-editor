@@ -79,7 +79,7 @@ impl Editor {
             (e, _) => (format!("{e} error{}", if e == 1 { "" } else { "s" }), theme::error(cx)),
         };
         let state =
-            MenuState { project: self.project.is_some(), running: self.task_running(), panel: self.show_bottom_panel };
+            MenuState { project: self.workspace.project.is_some(), running: self.task_running(), panel: self.chrome.show_bottom_panel };
         let focus = self.focus.clone();
         let menu = move |id: &'static str, label: &'static str, items: fn(PopupMenu, MenuState) -> PopupMenu| {
             let focus = focus.clone();
@@ -102,7 +102,7 @@ impl Editor {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if this.menu.take().is_some() {
+                    if this.canvas.menu.take().is_some() {
                         cx.notify();
                     }
                 }),
@@ -160,7 +160,7 @@ impl Editor {
                 div()
                     .px_2()
                     .text_color(theme::dim(cx))
-                    .child(format!("{}{}", self.file_name(), if self.history.is_dirty() { " •" } else { "" })),
+                    .child(format!("{}{}", self.file_name(), if self.doc.history.is_dirty() { " •" } else { "" })),
             )
             .child(
                 div()
