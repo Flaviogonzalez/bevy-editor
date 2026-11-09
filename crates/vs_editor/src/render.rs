@@ -8,12 +8,15 @@ use gpui_kit::{
     Window, canvas, div, point, prelude::*, px, rgba, size,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenu};
+use gpui_kit::component::{Disableable, Selectable, Sizable};
 use gpui_kit::component::empty::{
     Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
 };
 use gpui_kit::component::{Icon, IconName};
 use vs_graph::{Compiled, NodeId, PinType, Severity, Side, Value, library};
 
+use crate::actions;
 use crate::editor::{CodeView, Dialog, Drag, EditTarget, Editor};
 use crate::layout::{self, NodeLayout, Rect, V2};
 use crate::tasks::Outcome;
@@ -46,7 +49,8 @@ impl Render for Editor {
         let compiled = vs_graph::compile(&self.graph);
         let layouts = self.layouts();
 
-        div()
+        actions::register(div(), cx)
+            .key_context(actions::CONTEXT)
             .size_full()
             .flex()
             .flex_col()
@@ -97,7 +101,72 @@ fn button(id: &'static str, label: &str, cx: &App) -> gpui_kit::Stateful<Div> {
         .child(label.to_string())
 }
 
+/// A quiet toolbar button showing only an icon; its tooltip names the command and its shortcut.
+fn icon_button(id: &'static str, icon: IconName, tooltip: &'static str, action: &dyn gpui_kit::Action) -> Button {
+    let boxed = action.boxed_clone();
+    Button::new(id)
+        .ghost()
+        .small()
+        .tab_stop(false)
+        .icon(icon)
+        .tooltip_with_action(tooltip, action, Some(actions::CONTEXT))
+        .on_click(move |_, window, cx| window.dispatch_action(boxed.boxed_clone(), cx))
+}
+
+/// What some menu items depend on, captured when the toolbar renders.
+#[derive(Clone, Copy)]
+struct MenuState {
+    /// A project is open, so the project commands apply.
+    project: bool,
+    /// A preview or build is running.
+    running: bool,
+    /// The code panel is showing.
+    code: bool,
+}
+
+fn file_menu(menu: PopupMenu, _: MenuState) -> PopupMenu {
+    menu.menu("New script", Box::new(actions::NewScript))
+        .menu("Open script…", Box::new(actions::OpenScript))
+        .separator()
+        .menu("Save", Box::new(actions::Save))
+        .menu("Save as…", Box::new(actions::SaveAs))
+        .separator()
+        .menu("New project…", Box::new(actions::NewProject))
+        .menu("Open project…", Box::new(actions::OpenProject))
+        .separator()
+        .menu("Settings…", Box::new(actions::Settings))
+}
+
+fn edit_menu(menu: PopupMenu, _: MenuState) -> PopupMenu {
+    menu.menu("Undo", Box::new(actions::Undo))
+        .menu("Redo", Box::new(actions::Redo))
+        .separator()
+        .menu("Duplicate", Box::new(actions::Duplicate))
+        .menu("Delete", Box::new(actions::Delete))
+        .menu("Select all", Box::new(actions::SelectAll))
+}
+
+fn view_menu(menu: PopupMenu, state: MenuState) -> PopupMenu {
+    menu.menu("Add node…", Box::new(actions::AddNode))
+        .menu("Frame all", Box::new(actions::FrameAll))
+        .separator()
+        .menu_with_check("Code panel", state.code, Box::new(actions::ToggleCode))
+}
+
+fn project_menu(menu: PopupMenu, state: MenuState) -> PopupMenu {
+    let idle = state.project && !state.running;
+    menu.menu_with_disabled("Preview", Box::new(actions::Preview), !idle)
+        .menu_with_disabled("Build", Box::new(actions::Build), !idle)
+        .menu_with_disabled("Stop", Box::new(actions::Stop), !state.running)
+        .separator()
+        .menu_with_disabled("Refresh catalog", Box::new(actions::RefreshCatalog), !state.project)
+        .menu_with_disabled("Edit catalog", Box::new(actions::EditCatalog), !state.project)
+}
+
 impl Editor {
+    /// The top bar, laid out like a desktop editor's: menus on the left, the most used commands
+    /// as icon buttons, run controls in the middle, and the file and its status on the right.
+    /// Every control dispatches an action from actions.rs, so it behaves like its shortcut.
     fn toolbar(&self, compiled: &Compiled, cx: &mut Context<Self>) -> impl IntoElement {
         let errors = compiled.errors();
         let warnings = compiled.problems.len() - errors;
@@ -106,92 +175,89 @@ impl Editor {
             (0, w) => (format!("{w} warning{}", if w == 1 { "" } else { "s" }), theme::warning(cx)),
             (e, _) => (format!("{e} error{}", if e == 1 { "" } else { "s" }), theme::error(cx)),
         };
-        let title = format!("{}{}", self.file_name(), if self.history.is_dirty() { " •" } else { "" });
+        let state = MenuState { project: self.project.is_some(), running: self.task_running(), code: self.show_code };
+        let focus = self.focus.clone();
+        let menu = move |id: &'static str, label: &'static str, items: fn(PopupMenu, MenuState) -> PopupMenu| {
+            let focus = focus.clone();
+            Button::new(id).ghost().small().tab_stop(false).label(label).dropdown_menu(move |menu, _, _| {
+                items(menu.action_context(focus.clone()).min_w(px(220.0)), state)
+            })
+        };
+        let separator = || div().w(px(1.0)).h(px(18.0)).mx_1().bg(theme::border(cx));
 
         div()
             .h(px(40.0))
-            .px_3()
+            .px_2()
             .flex()
             .items_center()
-            .gap_2()
+            .gap_1()
             .bg(theme::toolbar_bg(cx))
             .border_b_1()
             .border_color(theme::border(cx))
-            .child(button("new", "New", cx).on_click(cx.listener(|this, _, window, cx| {
-                this.new_graph(window);
-                cx.notify();
-            })))
-            .child(button("open", "Open", cx).on_click(cx.listener(|this, _, window, cx| {
-                this.open(window);
-                cx.notify();
-            })))
-            .child(button("save", "Save", cx).on_click(cx.listener(|this, _, window, cx| {
-                this.save(window);
-                cx.notify();
-            })))
-            .child(button("save-as", "Save as", cx).on_click(cx.listener(|this, _, window, cx| {
-                this.save_as(window);
-                cx.notify();
-            })))
-            .child(div().w(px(8.0)))
-            .child(button("undo", "Undo", cx).on_click(cx.listener(|this, _, _, cx| {
-                this.undo();
-                cx.notify();
-            })))
-            .child(button("redo", "Redo", cx).on_click(cx.listener(|this, _, _, cx| {
-                this.redo();
-                cx.notify();
-            })))
-            .child(button("frame", "Frame", cx).on_click(cx.listener(|this, _, _, cx| {
-                this.frame();
-                cx.notify();
-            })))
-            .child(
-                button("code", if self.show_code { "Hide code" } else { "Show code" }, cx).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.show_code = !this.show_code;
+            // Using the bar dismisses the add-node menu, which would otherwise hold the keyboard.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.menu.take().is_some() {
                         cx.notify();
-                    }),
-                ),
+                    }
+                }),
             )
-            .child(div().w(px(8.0)))
-            .child(button("new-project", "New project", cx).on_click(cx.listener(|this, _, _, cx| {
-                this.new_project_dialog();
-                cx.notify();
-            })))
-            .child(button("open-project", "Open project", cx).on_click(cx.listener(|this, _, window, cx| {
-                this.open_project(window);
-                cx.notify();
-            })))
-            .when(self.project.is_some(), |d| {
-                let running = self.task_running();
-                d.child(button("preview", "▶ Preview", cx).when(running, |b| b.opacity(0.5)).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.run_preview(window, cx);
-                        cx.notify();
-                    },
-                )))
-                .child(button("build", "Build", cx).when(running, |b| b.opacity(0.5)).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.build(window, cx);
-                        cx.notify();
-                    },
-                )))
-                .when(running, |d| {
-                    d.child(button("stop", "■ Stop", cx).text_color(theme::error(cx)).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.stop_task();
-                            cx.notify();
-                        },
-                    )))
+            .child(menu("menu-file", "File", file_menu))
+            .child(menu("menu-edit", "Edit", edit_menu))
+            .child(menu("menu-view", "View", view_menu))
+            .child(menu("menu-project", "Project", project_menu))
+            .child(separator())
+            .child(icon_button("tb-undo", IconName::Undo, "Undo", &actions::Undo))
+            .child(icon_button("tb-redo", IconName::Redo, "Redo", &actions::Redo))
+            .child(icon_button("tb-frame", IconName::Frame, "Frame all", &actions::FrameAll))
+            .child(
+                icon_button("tb-code", IconName::PanelRight, "Code panel", &actions::ToggleCode)
+                    .selected(state.code),
+            )
+            .child(div().flex_1())
+            .when(state.project, |d| {
+                d.child(
+                    Button::new("tb-preview")
+                        .primary()
+                        .small()
+                        .tab_stop(false)
+                        .icon(IconName::Play)
+                        .label("Preview")
+                        .disabled(state.running)
+                        .tooltip_with_action("Run the game with this script", &actions::Preview, Some(actions::CONTEXT))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(actions::Preview), cx)),
+                )
+                .child(
+                    Button::new("tb-build")
+                        .outline()
+                        .small()
+                        .tab_stop(false)
+                        .label("Build")
+                        .disabled(state.running)
+                        .tooltip_with_action("Compile a release build", &actions::Build, Some(actions::CONTEXT))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(actions::Build), cx)),
+                )
+                .when(state.running, |d| {
+                    d.child(
+                        Button::new("tb-stop")
+                            .danger()
+                            .small()
+                            .tab_stop(false)
+                            .icon(IconName::Square)
+                            .label("Stop")
+                            .tooltip_with_action("Stop", &actions::Stop, Some(actions::CONTEXT))
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(actions::Stop), cx)),
+                    )
                 })
             })
-            .child(button("settings", "Settings", cx).on_click(cx.listener(|this, _, _, cx| {
-                this.open_settings();
-                cx.notify();
-            })))
             .child(div().flex_1())
-            .child(div().text_color(theme::dim(cx)).child(title))
+            .child(
+                div()
+                    .px_2()
+                    .text_color(theme::dim(cx))
+                    .child(format!("{}{}", self.file_name(), if self.history.is_dirty() { " •" } else { "" })),
+            )
             .child(
                 div()
                     .px_2p5()
@@ -203,6 +269,8 @@ impl Editor {
                     .text_size(px(12.0))
                     .child(pill),
             )
+            .child(separator())
+            .child(icon_button("tb-settings", IconName::Settings, "Settings", &actions::Settings))
     }
 
     // Canvas -----------------------------------------------------------------------------------

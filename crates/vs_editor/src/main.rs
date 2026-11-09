@@ -1,6 +1,7 @@
 //! Bevy visual script editor: a node graph editor, built on GPUI through gpui-kit, that saves Lua
 //! scripts.
 
+mod actions;
 mod editor;
 mod history;
 mod layout;
@@ -19,6 +20,7 @@ fn main() {
         gpui_kit::init(cx);
         // The editor is dark-only for now (see theme.rs); gpui-component starts in light mode.
         Theme::change(ThemeMode::Dark, None, cx);
+        actions::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1400.0), px(860.0)), cx);
         gpui_kit::open_window(
             WindowOptions {

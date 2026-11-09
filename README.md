@@ -187,6 +187,8 @@ The plugin embeds Lua through [`mlua`](https://github.com/mlua-rs/mlua) rather t
 
 ## Using the editor
 
+Every command is in the menu bar (File, Edit, View, Project), which also shows its shortcut. Hover an icon button to see what it does.
+
 | Action | How |
 | ------ | --- |
 | Add a node | Right-click empty canvas, or press Tab or Space. Type to filter, use the arrow keys, Enter to place |
@@ -196,13 +198,14 @@ The plugin embeds Lua through [`mlua`](https://github.com/mlua-rs/mlua) rather t
 | Move | Drag a node's header or body |
 | Select | Click, Shift or Ctrl click to add, drag a box on empty canvas |
 | Pan / zoom | Right or middle drag / mouse wheel |
-| Frame | F, or the Frame button |
+| Frame | F, or View → Frame all |
 | Delete | Delete or Backspace |
 | Duplicate, select all | Ctrl+D, Ctrl+A |
 | Undo, redo | Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z |
 | New, open, save, save as | Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S |
 | Name a node | Select it, click its Name field in the side panel |
-| New / open project, settings | Toolbar buttons; a dialog takes the name, Enter confirms, Escape cancels |
+| New / open project, settings | File menu; a dialog takes the name, Enter confirms, Escape cancels |
+| Preview, build, stop | F5, Ctrl+B, Shift+F5, or the Project menu and the toolbar's run buttons |
 
 The side panel shows the project and its scripts, the output of the last preview or build, the selected node, the graph's variables (rename, change type, add Get / Set nodes), the problems the compiler found (click one to jump to its node), and the generated Lua or Rust.
 

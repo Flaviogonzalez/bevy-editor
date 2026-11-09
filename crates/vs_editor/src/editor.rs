@@ -877,18 +877,10 @@ impl Editor {
             return;
         }
 
-        match (ctrl, ks.modifiers.shift, key) {
-            (false, _, "delete" | "backspace") => self.delete_selected(),
-            (true, false, "z") => self.undo(),
-            (true, true, "z") | (true, _, "y") => self.redo(),
-            (true, false, "s") => self.save(window),
-            (true, true, "s") => self.save_as(window),
-            (true, _, "o") => self.open(window),
-            (true, _, "n") => self.new_graph(window),
-            (true, _, "d") => self.duplicate_selected(),
-            (true, _, "a") => self.selected = self.graph.nodes.iter().map(|n| n.id).collect(),
-            (false, _, "f") => self.frame(),
-            (false, _, "tab" | "space") => self.open_menu(self.mouse, None),
+        // Shortcuts with a menu item are actions (see actions.rs); these are the extra keys.
+        match (ctrl, key) {
+            (false, "backspace") => self.delete_selected(),
+            (false, "space") => self.open_menu(self.mouse, None),
             _ => {}
         }
     }
