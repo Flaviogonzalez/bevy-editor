@@ -157,6 +157,11 @@ fn folders(path: &str) -> Vec<String> {
     parts.into_iter().map(ident_name).collect()
 }
 
+/// The plugin a folder becomes, by the folder's name as written: `Enemy AI` → `EnemyAiPlugin`.
+pub fn folder_plugin_name(folder: &str) -> String {
+    folder_plugin(&ident_name(folder))
+}
+
 /// `player` → `PlayerPlugin`.
 fn folder_plugin(module: &str) -> String {
     let ty: String = module

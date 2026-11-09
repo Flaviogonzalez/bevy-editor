@@ -16,7 +16,10 @@ pub enum Dialog {
     Settings,
     /// Asks for a name; `buffer` is what's typed so far.
     NewProject { buffer: String },
-    NewScript { buffer: String },
+    /// A script in `folder` (a path in the scripts folder, `""` for the top).
+    NewScript { buffer: String, folder: String },
+    /// A folder in `parent`.
+    NewFolder { buffer: String, parent: String },
 }
 
 /// The tabs of the panel under the canvas.
@@ -44,6 +47,8 @@ pub struct Chrome {
     /// The line at the bottom of the window: the result of the last command.
     pub status: String,
     pub dialog: Option<Dialog>,
+    /// The Explorer's folded folders, by path in the scripts folder (`player/input`).
+    pub collapsed: std::collections::BTreeSet<String>,
 }
 
 impl Default for Chrome {
@@ -54,6 +59,7 @@ impl Default for Chrome {
             code_view: CodeView::Lua,
             status: String::new(),
             dialog: None,
+            collapsed: Default::default(),
         }
     }
 }

@@ -165,20 +165,44 @@ impl Project {
         vs_graph::script_name(&self.scripts_dir(), file)
     }
 
-    /// Adds an empty script. Its component is named after it (`door` → `Door`).
-    pub fn new_script(&self, name: &str) -> Result<PathBuf> {
+    /// Adds an empty script in `folder`, a path in [`Self::scripts_dir`] (`player`, or `""` for
+    /// the top). Its component is named after it (`door` → `Door`), and since every component is
+    /// named at the root of the scripts, no other script in the project may have that name.
+    pub fn new_script(&self, folder: &str, name: &str) -> Result<PathBuf> {
         let Some(stem) = package_name(name) else {
             bail!("`{name}` can't be a script name: use letters, digits and spaces, starting with a letter");
         };
-        let path = self.scripts_dir().join(format!("{stem}.lua"));
-        if path.exists() {
-            bail!("{} already exists", path.display());
+        let dir = self.scripts_dir().join(folder);
+        let path = dir.join(format!("{stem}.lua"));
+        let ty = vs_graph::rust::names(&stem).ty;
+        if let Some(other) = self.scripts().into_iter().find(|s| vs_graph::rust::names(&self.script_name(s)).ty == ty) {
+            bail!("{} already has a component named `{ty}`", self.script_name(&other));
         }
-        std::fs::create_dir_all(self.scripts_dir())?;
+        if dir.join(&stem).is_dir() {
+            bail!("the folder `{stem}` would have the same module name; pick another name");
+        }
+        std::fs::create_dir_all(&dir)?;
         let mut graph = vs_graph::Graph::default();
         graph.add_node("event.update", None, 0.0, 0.0);
         std::fs::write(&path, vs_graph::save_to_string(&graph))?;
         Ok(path)
+    }
+
+    /// Adds an empty folder in `parent` (a path in [`Self::scripts_dir`], or `""`). It becomes a
+    /// plugin once it has scripts. Returns its path in the scripts folder: `player/input`.
+    pub fn new_folder(&self, parent: &str, name: &str) -> Result<String> {
+        let Some(stem) = package_name(name) else {
+            bail!("`{name}` can't be a folder name: use letters, digits and spaces, starting with a letter");
+        };
+        let dir = self.scripts_dir().join(parent);
+        if dir.join(&stem).exists() {
+            bail!("`{stem}` already exists");
+        }
+        if dir.join(format!("{stem}.lua")).exists() {
+            bail!("the script `{stem}.lua` would have the same module name; pick another name");
+        }
+        std::fs::create_dir_all(dir.join(&stem))?;
+        Ok(if parent.is_empty() { stem } else { format!("{parent}/{stem}") })
     }
 
     /// Where the exported source goes.
@@ -407,8 +431,17 @@ mod tests {
         assert_eq!(project.name, "test_game");
         assert_eq!(Project::open(&project.root).unwrap(), project);
         assert_eq!(project.scripts().len(), 1);
-        project.new_script("Door").unwrap();
-        assert!(project.new_script("door").is_err());
+        project.new_script("", "Door").unwrap();
+        assert!(project.new_script("", "door").is_err());
+        // Folders: a script's type must be unique in the whole project, and a folder and a
+        // script can't share a module name.
+        assert_eq!(project.new_folder("", "Enemies").unwrap(), "enemies");
+        assert!(project.new_script("enemies", "Door").is_err());
+        assert!(project.new_script("", "enemies").is_err());
+        assert!(project.new_folder("", "door").is_err());
+        let goblin = project.new_script("enemies", "Goblin").unwrap();
+        assert_eq!(project.script_name(&goblin), "enemies/goblin.lua");
+        std::fs::remove_file(goblin).unwrap();
         // A script in a folder: the folder is a plugin, in its own module.
         let jump = project.scripts_dir().join("player").join("jump.lua");
         std::fs::create_dir_all(jump.parent().unwrap()).unwrap();

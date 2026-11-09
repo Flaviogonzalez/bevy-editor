@@ -1,9 +1,12 @@
-//! The left panel, what you navigate and declare: the open project (its scripts and its catalog
-//! of components), then the graph's variables.
+//! The left panel, what you navigate and declare: the open project (its scripts, in a tree of
+//! folders that each become a plugin, and its catalog of components), then the graph's
+//! variables.
 
+
+use std::path::{Path, PathBuf};
 
 use gpui_kit::{
-    Anchor, App, Context, Div, IntoElement, Hsla, SharedString,
+    Anchor, AnyElement, App, Context, Div, IntoElement, Hsla, SharedString,
     Window, div, prelude::*, px,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -15,6 +18,7 @@ use vs_graph::{PinType, Value};
 use crate::actions;
 use crate::editor::{EditTarget, Editor};
 use crate::theme;
+use crate::panels::dialog::folder_plugin;
 use crate::ui::{dispatch, field, group, panel, panel_title};
 use crate::canvas::layout::{self, V2};
 
@@ -62,42 +66,11 @@ impl Editor {
                         ),
                 );
         };
-        let rows = project.scripts().into_iter().enumerate().map(|(i, path)| {
-            let open = self.doc.path.as_ref() == Some(&path);
-            let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            div()
-                .id(("script", i))
-                .h(px(26.0))
-                .px_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .rounded_md()
-                .text_color(if open { theme::text(cx) } else { theme::dim(cx) })
-                .when(open, |d| d.bg(theme::highlight(cx)))
-                .hover(|s| s.bg(theme::button_hover(cx)).text_color(theme::text(cx)))
-                .cursor_pointer()
-                .child(Icon::new(IconName::FileText).small())
-                .child(name)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.doc.path.as_ref() != Some(&path) && this.confirm_discard() {
-                        this.open_path(path.clone(), window);
-                    }
-                    cx.notify();
-                }))
-        });
-        let new_script = Button::new("script-add")
-            .ghost()
-            .xsmall()
-            .tab_stop(false)
-            .icon(IconName::Plus)
-            .tooltip("New script")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.new_script_dialog();
-                cx.notify();
-            }));
+        let mut rows = Vec::new();
+        self.tree_rows(&project.scripts_dir(), "", 0, &mut rows, cx);
+        let new_script = self.add_menu_button("script-add".into(), "", "New script or folder", cx);
         let catalog = vs_graph::components::project().len();
-        group(format!("Project · {}", project.name), Some(new_script.into_any_element()), cx)
+        group(format!("Project · {}", project.name), Some(new_script), cx)
             .child(
                 div()
                     .pb_1()
@@ -255,6 +228,122 @@ impl Editor {
                 d.child(div().text_color(theme::dim(cx)).child("No variables. A variable keeps a value between frames."))
             })
             .children(rows)
+    }
+}
+
+/// What's in a folder of scripts, as the Explorer lists it: its folders, then its scripts, each
+/// sorted by name. Read from disk on every render, like the script list was, so files added
+/// outside the editor show up.
+fn entries(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut all: Vec<PathBuf> =
+        std::fs::read_dir(dir).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect()).unwrap_or_default();
+    all.sort();
+    let (folders, files): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| p.is_dir());
+    (folders, files.into_iter().filter(|p| p.extension().is_some_and(|e| e == "lua")).collect())
+}
+
+impl Editor {
+    /// The rows for the folder at `dir` (`rel` in the scripts folder, `""` for the top), at
+    /// `depth`: each folder, with the plugin it becomes and, unless folded, what's in it; then
+    /// each script.
+    fn tree_rows(&self, dir: &Path, rel: &str, depth: usize, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
+        let indent = px(8.0 + depth as f32 * 14.0);
+        let (folders, files) = entries(dir);
+        for folder in folders {
+            let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            let open = !self.chrome.collapsed.contains(&path);
+            let toggle = path.clone();
+            let row = div()
+                .id(SharedString::from(format!("folder-{path}")))
+                .h(px(26.0))
+                .pl(indent)
+                .pr_1()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .rounded_md()
+                .text_color(theme::dim(cx))
+                .hover(|s| s.bg(theme::button_hover(cx)).text_color(theme::text(cx)))
+                .cursor_pointer()
+                .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
+                .child(Icon::new(if open { IconName::FolderOpen } else { IconName::Folder }).small())
+                .child(div().text_color(theme::text(cx)).child(name))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_size(px(11.0))
+                        .child(folder_plugin(&path)),
+                )
+                .child(self.add_menu_button(SharedString::from(format!("folder-add-{path}")), &path, "Add in this folder", cx))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.chrome.collapsed.remove(&toggle) {
+                        this.chrome.collapsed.insert(toggle.clone());
+                    }
+                    cx.notify();
+                }));
+            rows.push(row.into_any_element());
+            if open {
+                self.tree_rows(&folder, &path, depth + 1, rows, cx);
+            }
+        }
+        for path in files {
+            let open = self.doc.path.as_ref() == Some(&path);
+            let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let row = div()
+                .id(SharedString::from(format!("script-{}", path.display())))
+                .h(px(26.0))
+                // Lined up with the folder names, past the chevron.
+                .pl(indent + px(if depth == 0 { 0.0 } else { 18.0 }))
+                .pr_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .text_color(if open { theme::text(cx) } else { theme::dim(cx) })
+                .when(open, |d| d.bg(theme::highlight(cx)))
+                .hover(|s| s.bg(theme::button_hover(cx)).text_color(theme::text(cx)))
+                .cursor_pointer()
+                .child(Icon::new(IconName::FileText).small())
+                .child(name)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.doc.path.as_ref() != Some(&path) && this.confirm_discard() {
+                        this.open_path(path.clone(), window);
+                    }
+                    cx.notify();
+                }));
+            rows.push(row.into_any_element());
+        }
+    }
+
+    /// A `+` that offers a new script or a new folder in `folder` (`""` for the top).
+    fn add_menu_button(&self, id: SharedString, folder: &str, tooltip: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let editor = cx.entity().downgrade();
+        let folder = folder.to_string();
+        let button = Button::new(id.clone()).ghost().xsmall().tab_stop(false).icon(IconName::Plus).tooltip(tooltip).dropdown_menu_with_anchor(
+            Anchor::TopRight,
+            move |menu, _, _| {
+                let run = |f: fn(&mut Editor, &str)| {
+                    let (editor, folder) = (editor.clone(), folder.clone());
+                    move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                        editor
+                            .update(cx, |e, cx| {
+                                f(e, &folder);
+                                cx.notify();
+                            })
+                            .ok();
+                    }
+                };
+                menu.item(PopupMenuItem::new("New script").on_click(run(Editor::new_script_dialog)))
+                    .item(PopupMenuItem::new("New folder").on_click(run(Editor::new_folder_dialog)))
+            },
+        );
+        // On a folder's row, opening the menu shouldn't also fold the folder.
+        div().id(SharedString::from(format!("{id}-wrap"))).on_click(|_, _, cx| cx.stop_propagation()).child(button).into_any_element()
     }
 }
 

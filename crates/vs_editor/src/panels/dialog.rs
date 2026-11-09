@@ -12,6 +12,11 @@ use gpui_kit::Window;
 use crate::theme;
 use crate::ui::{button, field};
 
+/// The plugin a folder of scripts becomes: `player/input` → `InputPlugin`.
+pub(crate) fn folder_plugin(folder: &str) -> String {
+    vs_graph::rust::folder_plugin_name(folder.rsplit('/').next().unwrap_or(folder))
+}
+
 impl Editor {
     pub(crate) fn dialog_element(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let dialog = self.chrome.dialog.as_ref().expect("checked by the caller");
@@ -42,13 +47,21 @@ impl Editor {
                         .text_color(theme::dim(cx))
                         .child(format!("Saved in {}", vs_project::Config::path().display())),
                 ),
-            Dialog::NewProject { buffer } | Dialog::NewScript { buffer } => {
+            Dialog::NewProject { buffer } | Dialog::NewScript { buffer, .. } | Dialog::NewFolder { buffer, .. } => {
                 let (title, hint) = match dialog {
                     Dialog::NewProject { .. } => (
                         "New project",
                         format!("It goes in {}", self.workspace.config.projects_dir.display()),
                     ),
-                    _ => ("New script", "It becomes a component you can put on entities".to_string()),
+                    Dialog::NewScript { folder, .. } if !folder.is_empty() => (
+                        "New script",
+                        format!("In {folder}/: a component you can put on entities, added by {}", folder_plugin(folder)),
+                    ),
+                    Dialog::NewScript { .. } => ("New script", "It becomes a component you can put on entities".to_string()),
+                    Dialog::NewFolder { parent, .. } if !parent.is_empty() => {
+                        ("New folder", format!("In {parent}/: a plugin of the scripts you put in it"))
+                    }
+                    _ => ("New folder", "It becomes a plugin of the scripts you put in it".to_string()),
                 };
                 div()
                     .flex()
@@ -141,9 +154,17 @@ impl Editor {
         self.chrome.dialog = Some(Dialog::NewProject { buffer: String::new() });
     }
 
-    pub fn new_script_dialog(&mut self) {
+    /// Asks for the name of a script to add in `folder` (`""` for the top).
+    pub fn new_script_dialog(&mut self, folder: &str) {
         if self.workspace.project.is_some() {
-            self.chrome.dialog = Some(Dialog::NewScript { buffer: String::new() });
+            self.chrome.dialog = Some(Dialog::NewScript { buffer: String::new(), folder: folder.to_string() });
+        }
+    }
+
+    /// Asks for the name of a folder to add in `parent` (`""` for the top).
+    pub fn new_folder_dialog(&mut self, parent: &str) {
+        if self.workspace.project.is_some() {
+            self.chrome.dialog = Some(Dialog::NewFolder { buffer: String::new(), parent: parent.to_string() });
         }
     }
 
@@ -152,12 +173,16 @@ impl Editor {
             "escape" => self.chrome.dialog = None,
             "enter" => self.confirm_dialog(window),
             "backspace" => {
-                if let Some(Dialog::NewProject { buffer } | Dialog::NewScript { buffer }) = &mut self.chrome.dialog {
+                if let Some(Dialog::NewProject { buffer } | Dialog::NewScript { buffer, .. } | Dialog::NewFolder { buffer, .. }) =
+                    &mut self.chrome.dialog
+                {
                     buffer.pop();
                 }
             }
             _ => {
-                if let (Some(t), Some(Dialog::NewProject { buffer } | Dialog::NewScript { buffer })) = (typed, &mut self.chrome.dialog) {
+                if let (Some(t), Some(Dialog::NewProject { buffer } | Dialog::NewScript { buffer, .. } | Dialog::NewFolder { buffer, .. })) =
+                    (typed, &mut self.chrome.dialog)
+                {
                     buffer.push_str(&t);
                 }
             }
@@ -181,12 +206,12 @@ impl Editor {
                     }
                 }
             }
-            Some(Dialog::NewScript { buffer }) => {
+            Some(Dialog::NewScript { buffer, folder }) => {
                 let Some(project) = self.workspace.project.clone() else { return };
                 if !self.confirm_discard() {
                     return;
                 }
-                match project.new_script(&buffer) {
+                match project.new_script(&folder, &buffer) {
                     Ok(path) => {
                         self.open_path(path, window);
                         if let Some(stem) = self.doc.path.as_ref().and_then(|p| p.file_stem()) {
@@ -196,7 +221,20 @@ impl Editor {
                     }
                     Err(e) => {
                         self.chrome.status = format!("Couldn't add the script: {e}");
-                        self.chrome.dialog = Some(Dialog::NewScript { buffer });
+                        self.chrome.dialog = Some(Dialog::NewScript { buffer, folder });
+                    }
+                }
+            }
+            Some(Dialog::NewFolder { buffer, parent }) => {
+                let Some(project) = self.workspace.project.clone() else { return };
+                match project.new_folder(&parent, &buffer) {
+                    Ok(folder) => {
+                        self.chrome.collapsed.remove(&parent);
+                        self.chrome.status = format!("Added {folder}/. Scripts you add in it make up {}", folder_plugin(&folder));
+                    }
+                    Err(e) => {
+                        self.chrome.status = format!("Couldn't add the folder: {e}");
+                        self.chrome.dialog = Some(Dialog::NewFolder { buffer, parent });
                     }
                 }
             }
