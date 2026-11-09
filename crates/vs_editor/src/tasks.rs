@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,12 +20,25 @@ pub enum Then {
     Catalog(std::path::PathBuf),
 }
 
+/// How a task ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Succeeded,
+    Failed,
+    /// Ended by [`Task::stop`], so its exit status says nothing about the run.
+    Stopped,
+}
+
+/// A cargo process: running while [`Task::finished`] is `None`, then ended with an [`Outcome`].
 pub struct Task {
     pub label: String,
     pub lines: Arc<Mutex<Vec<String>>>,
-    /// `Some(success)` once the process has exited.
-    pub result: Arc<Mutex<Option<bool>>>,
-    child: Arc<Mutex<Option<Child>>>,
+    /// `Some` once the process has exited.
+    result: Arc<Mutex<Option<Outcome>>>,
+    /// Set by [`Task::stop`] before it kills the process, so the exit reads as stopped.
+    stopped: Arc<AtomicBool>,
+    child: Arc<Mutex<Child>>,
+    /// Runs only after [`Outcome::Succeeded`].
     pub then: Option<Then>,
 }
 
@@ -45,52 +59,56 @@ impl Task {
         let lines = Arc::new(Mutex::new(Vec::new()));
         collect(child.stdout.take().unwrap(), lines.clone());
         collect(child.stderr.take().unwrap(), lines.clone());
-        let child = Arc::new(Mutex::new(Some(child)));
+        let child = Arc::new(Mutex::new(child));
         let result = Arc::new(Mutex::new(None));
+        let stopped = Arc::new(AtomicBool::new(false));
         {
-            let (child, result) = (child.clone(), result.clone());
+            let (child, result, stopped) = (child.clone(), result.clone(), stopped.clone());
             std::thread::spawn(move || {
                 loop {
-                    let status = match child.lock().unwrap().as_mut() {
-                        Some(c) => c.try_wait(),
-                        None => return,
+                    let status = child.lock().unwrap().try_wait();
+                    let success = match status {
+                        Ok(Some(status)) => status.success(),
+                        Ok(None) => {
+                            std::thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                        Err(_) => false,
                     };
-                    match status {
-                        Ok(Some(status)) => {
-                            *result.lock().unwrap() = Some(status.success());
-                            return;
-                        }
-                        Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                        Err(_) => {
-                            *result.lock().unwrap() = Some(false);
-                            return;
-                        }
-                    }
+                    let outcome = if stopped.load(Ordering::SeqCst) {
+                        Outcome::Stopped
+                    } else if success {
+                        Outcome::Succeeded
+                    } else {
+                        Outcome::Failed
+                    };
+                    *result.lock().unwrap() = Some(outcome);
+                    return;
                 }
             });
         }
-        Ok(Self { label: label.into(), lines, result, child, then })
+        Ok(Self { label: label.into(), lines, result, stopped, child, then })
     }
 
-    pub fn finished(&self) -> Option<bool> {
+    pub fn finished(&self) -> Option<Outcome> {
         *self.result.lock().unwrap()
     }
 
     /// Stops the process and everything it started (`cargo run` starts the game).
     pub fn stop(&self) {
-        if let Some(child) = self.child.lock().unwrap().as_mut() {
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                let _ = Command::new("taskkill")
-                    .args(["/T", "/F", "/PID", &child.id().to_string()])
-                    .creation_flags(0x0800_0000)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-            let _ = child.kill();
+        self.stopped.store(true, Ordering::SeqCst);
+        let mut child = self.child.lock().unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &child.id().to_string()])
+                .creation_flags(0x0800_0000)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
+        let _ = child.kill();
     }
 
     pub fn tail(&self, n: usize) -> Vec<String> {
@@ -104,5 +122,57 @@ impl Drop for Task {
         if self.finished().is_none() {
             self.stop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shell(script: &str) -> Command {
+        #[cfg(windows)]
+        let mut c = {
+            let mut c = Command::new("cmd");
+            c.arg("/C");
+            c
+        };
+        #[cfg(not(windows))]
+        let mut c = {
+            let mut c = Command::new("sh");
+            c.arg("-c");
+            c
+        };
+        c.arg(script);
+        c
+    }
+
+    fn wait(task: &Task) -> Outcome {
+        for _ in 0..200 {
+            if let Some(outcome) = task.finished() {
+                return outcome;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("the task didn't finish");
+    }
+
+    #[test]
+    fn exit_status_decides_the_outcome() {
+        let ok = Task::spawn("ok", shell("exit 0"), None).unwrap();
+        assert_eq!(wait(&ok), Outcome::Succeeded);
+        let failed = Task::spawn("failed", shell("exit 3"), None).unwrap();
+        assert_eq!(wait(&failed), Outcome::Failed);
+    }
+
+    #[test]
+    fn a_stopped_task_reads_as_stopped() {
+        #[cfg(windows)]
+        let long = "ping -n 30 127.0.0.1 >NUL";
+        #[cfg(not(windows))]
+        let long = "sleep 30";
+        let task = Task::spawn("long", shell(long), None).unwrap();
+        assert_eq!(task.finished(), None);
+        task.stop();
+        assert_eq!(wait(&task), Outcome::Stopped);
     }
 }

@@ -5,9 +5,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{Context, FocusHandle, KeyDownEvent, Window};
+use gpui_kit::{Context, FocusHandle, KeyDownEvent, Window};
 use vs_graph::{Graph, NodeId, PinRef, PinType, Side, Value, Variable, library};
 
+use crate::history::History;
 use crate::layout::{self, Hit, NodeLayout, Rect, V2};
 use crate::tasks::Task;
 
@@ -15,12 +16,16 @@ pub const MIN_ZOOM: f32 = 0.3;
 pub const MAX_ZOOM: f32 = 2.0;
 
 /// What the left or right mouse button is doing right now.
+///
+/// Every drag ends in [`Editor::end_drag`], whether the button comes up over the canvas or
+/// somewhere we didn't see, so its history entry is recorded either way.
 pub enum Drag {
     None,
     Pan { last: V2, moved: bool, opens_menu: bool },
     Nodes { last: V2, before: Graph, moved: bool },
-    /// A wire being pulled from `anchor`. `side` is the side of the anchor pin.
-    Wire { anchor: PinRef, side: Side, cursor: V2 },
+    /// A wire being pulled from `anchor`. `side` is the side of the anchor pin. `before` is the
+    /// graph before the drag when it picked up an existing wire (and so already changed the graph).
+    Wire { anchor: PinRef, side: Side, cursor: V2, before: Option<Graph> },
     Select { start: V2, cursor: V2, additive: bool },
 }
 
@@ -78,15 +83,14 @@ pub enum CodeView {
 pub struct Editor {
     pub graph: Graph,
     pub path: Option<PathBuf>,
-    pub dirty: bool,
     pub pan: V2,
     pub zoom: f32,
     pub selected: BTreeSet<NodeId>,
     pub drag: Drag,
     pub menu: Option<Menu>,
     pub editing: Option<Editing>,
-    pub undo: Vec<Graph>,
-    pub redo: Vec<Graph>,
+    /// Undo, redo and unsaved changes.
+    pub history: History,
     pub focus: FocusHandle,
     pub show_code: bool,
     pub status: String,
@@ -95,7 +99,8 @@ pub struct Editor {
     /// The canvas origin in window coordinates and its size, written while painting.
     pub canvas: Rc<Cell<(V2, V2)>>,
     pub config: vs_project::Config,
-    /// The project the open script belongs to, if any.
+    /// The project the open script belongs to, if any. Change it with [`Editor::set_project`],
+    /// which also loads that project's catalog of components.
     pub project: Option<vs_project::Project>,
     pub dialog: Option<Dialog>,
     pub code_view: CodeView,
@@ -111,15 +116,13 @@ impl Editor {
         Self {
             graph: starter_graph(),
             path: None,
-            dirty: false,
             pan: V2::new(60.0, 60.0),
             zoom: 1.0,
             selected: BTreeSet::new(),
             drag: Drag::None,
             menu: None,
             editing: None,
-            undo: Vec::new(),
-            redo: Vec::new(),
+            history: History::default(),
             focus,
             show_code: true,
             status: "Right-click or press Tab on the canvas to add a node".into(),
@@ -135,7 +138,7 @@ impl Editor {
 
     // Coordinates ------------------------------------------------------------------------------
 
-    pub fn to_local(&self, window_pos: gpui::Point<gpui::Pixels>) -> V2 {
+    pub fn to_local(&self, window_pos: gpui_kit::Point<gpui_kit::Pixels>) -> V2 {
         let origin = self.canvas.get().0;
         V2::new(window_pos.x.as_f32() - origin.x, window_pos.y.as_f32() - origin.y)
     }
@@ -156,24 +159,17 @@ impl Editor {
 
     /// Call before every change to the graph.
     pub fn checkpoint(&mut self) {
-        self.undo.push(self.graph.clone());
-        if self.undo.len() > 200 {
-            self.undo.remove(0);
-        }
-        self.redo.clear();
-        self.dirty = true;
+        self.history.record(self.graph.clone());
     }
 
     pub fn undo(&mut self) {
-        if let Some(prev) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.graph, prev));
+        if self.history.undo(&mut self.graph) {
             self.after_history();
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.graph, next));
+        if self.history.redo(&mut self.graph) {
             self.after_history();
         }
     }
@@ -181,7 +177,6 @@ impl Editor {
     fn after_history(&mut self) {
         self.selected.retain(|id| self.graph.node(*id).is_some());
         self.editing = None;
-        self.dirty = true;
     }
 
     // Mouse ------------------------------------------------------------------------------------
@@ -199,11 +194,13 @@ impl Editor {
                     Side::Output => None,
                 };
                 if let Some(link) = existing {
-                    self.checkpoint();
+                    // One undo step for the whole gesture: recorded when the drag ends.
+                    let before = self.graph.clone();
                     self.graph.links.retain(|l| l != &link);
-                    self.drag = Drag::Wire { anchor: link.from, side: Side::Output, cursor: g };
+                    self.drag =
+                        Drag::Wire { anchor: link.from, side: Side::Output, cursor: g, before: Some(before) };
                 } else {
-                    self.drag = Drag::Wire { anchor: pin, side, cursor: g };
+                    self.drag = Drag::Wire { anchor: pin, side, cursor: g, before: None };
                 }
             }
             Hit::Field(node, pin) => {
@@ -269,8 +266,9 @@ impl Editor {
     pub fn mouse_move(&mut self, local: V2, any_button_held: bool) -> bool {
         self.mouse = local;
         if !any_button_held && !matches!(self.drag, Drag::None) {
-            // The button went up somewhere we didn't see, such as outside the window.
-            self.drag = Drag::None;
+            // The button went up somewhere we didn't see, such as outside the window: keep what
+            // the drag already changed, but don't act on a drop we didn't see.
+            self.end_drag(None);
             return true;
         }
         let g = self.to_graph(local);
@@ -300,40 +298,42 @@ impl Editor {
     }
 
     pub fn mouse_up(&mut self, local: V2) {
-        let g = self.to_graph(local);
+        self.end_drag(Some(local));
+    }
+
+    /// Ends the current drag. `drop` is where the button came up, canvas-local, or `None` when it
+    /// came up somewhere we didn't see: then whatever the drag already changed is kept and
+    /// recorded, but nothing that depends on the drop point happens (linking, the menu, the
+    /// selection box).
+    pub fn end_drag(&mut self, drop: Option<V2>) {
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::None => {}
             Drag::Pan { moved, opens_menu, .. } => {
-                if !moved && opens_menu {
+                if let Some(local) = drop
+                    && !moved
+                    && opens_menu
+                {
                     self.open_menu(local, None);
                 }
             }
             Drag::Nodes { before, moved, .. } => {
                 if moved {
-                    self.undo.push(before);
-                    self.redo.clear();
-                    self.dirty = true;
+                    self.history.record(before);
                 }
             }
-            Drag::Wire { anchor, side, .. } => {
-                let layouts = self.layouts();
-                match layout::hit_test(&layouts, g) {
-                    Hit::Pin(target, target_side) if target_side != side => {
-                        let (from, to) = match side {
-                            Side::Output => (anchor, target),
-                            Side::Input => (target, anchor),
-                        };
-                        if self.graph.can_link(&from, &to) {
-                            self.checkpoint();
-                            self.graph.link(from, to);
-                        } else {
-                            self.status = "Those pins don't fit together".into();
-                        }
-                    }
-                    Hit::Empty => self.open_menu(local, Some((anchor, side))),
-                    _ => {}
+            Drag::Wire { anchor, side, before, .. } => {
+                // A picked-up wire already changed the graph; a new one hasn't yet.
+                let picked_up = before.is_some();
+                let before = before.unwrap_or_else(|| self.graph.clone());
+                let linked = match drop {
+                    Some(local) => self.drop_wire(local, anchor, side),
+                    None => false,
+                };
+                if linked || picked_up {
+                    self.history.record(before);
                 }
             }
+            Drag::Select { .. } if drop.is_none() => {}
             Drag::Select { start, cursor, additive } => {
                 let area = Rect::from_points(start, cursor);
                 if area.w() > 2.0 || area.h() > 2.0 {
@@ -348,6 +348,28 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// Drops a wire pulled from `anchor` at `local`: links it to the pin there, or opens the menu
+    /// over empty canvas. Returns whether it linked. The caller records the history entry.
+    fn drop_wire(&mut self, local: V2, anchor: PinRef, side: Side) -> bool {
+        let layouts = self.layouts();
+        match layout::hit_test(&layouts, self.to_graph(local)) {
+            Hit::Pin(target, target_side) if target_side != side => {
+                let (from, to) = match side {
+                    Side::Output => (anchor, target),
+                    Side::Input => (target, anchor),
+                };
+                if self.graph.can_link(&from, &to) {
+                    self.graph.link(from, to);
+                    return true;
+                }
+                self.status = "Those pins don't fit together".into();
+            }
+            Hit::Empty => self.open_menu(local, Some((anchor, side))),
+            _ => {}
+        }
+        false
     }
 
     pub fn scroll(&mut self, local: V2, dy: f32) {
@@ -673,7 +695,7 @@ impl Editor {
     // Files ------------------------------------------------------------------------------------
 
     pub fn confirm_discard(&self) -> bool {
-        !self.dirty
+        !self.history.is_dirty()
             || rfd::MessageDialog::new()
                 .set_title("Unsaved changes")
                 .set_description("The current graph has unsaved changes. Discard them?")
@@ -695,15 +717,13 @@ impl Editor {
         Self {
             graph: Graph::default(),
             path: None,
-            dirty: false,
             pan: V2::new(60.0, 60.0),
             zoom: 1.0,
             selected: BTreeSet::new(),
             drag: Drag::None,
             menu: None,
             editing: None,
-            undo: Vec::new(),
-            redo: Vec::new(),
+            history: History::default(),
             focus: self.focus.clone(),
             show_code: self.show_code,
             status: String::new(),
@@ -739,9 +759,17 @@ impl Editor {
         {
             Ok(graph) => {
                 let project = vs_project::Project::containing(&path).or_else(|| self.project.clone());
-                *self = Self { graph, path: Some(path.clone()), project, ..self.reset() };
+                *self = Self { graph, path: Some(path.clone()), ..self.reset() };
+                // Always reload, even for the same project: a preview may have rewritten its catalog.
+                let catalog = match project {
+                    Some(project) => self.set_project(project),
+                    None => Ok(()),
+                };
                 self.frame();
-                self.status = format!("Opened {}", path.display());
+                self.status = match catalog {
+                    Ok(()) => format!("Opened {}", path.display()),
+                    Err(e) => format!("Opened {}, but {e}", path.display()),
+                };
                 self.update_title(window);
             }
             Err(e) => self.status = format!("Couldn't open {}: {e}", path.display()),
@@ -773,7 +801,7 @@ impl Editor {
             Ok(()) => {
                 self.status = format!("Saved {}", path.display());
                 self.path = Some(path);
-                self.dirty = false;
+                self.history.mark_saved();
                 self.update_title(window);
             }
             Err(e) => self.status = format!("Couldn't save {}: {e}", path.display()),

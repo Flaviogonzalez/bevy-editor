@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-# Bevy 0.19 renders with wgpu 29, the same major version as gpui-ce 0.3 (see README).
+# Bevy 0.19 (wgpu 29). The editor's GPUI is on wgpu 30 where it uses wgpu; see README.
 bevy = { version = "0.19.1", default-features = false, features = ["std", "bevy_asset", "bevy_log", "bevy_color", "keyboard", "mouse", "bevy_window"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -120,7 +120,7 @@ One limit of the preview: the Lua script keeps its own copy of the variables, so
 | ----- | ------------- |
 | [`crates/vs_nodes`](crates/vs_nodes) | The node definitions and intrinsics both runtimes call |
 | [`crates/vs_graph`](crates/vs_graph) | The graph model, the node library, the IR, both backends and the file format. No UI dependency |
-| [`crates/vs_editor`](crates/vs_editor) | The editor app, built on [gpui-ce](https://github.com/gpui-ce/gpui-ce) |
+| [`crates/vs_editor`](crates/vs_editor) | The editor app, built on [gpui-kit](https://github.com/longbridge/gpui-kit) (GPUI and gpui-component) |
 | [`crates/vs_bevy`](crates/vs_bevy) | The Lua runtime and the preview plugin that attaches it to generated components |
 | [`crates/vs_project`](crates/vs_project) | Projects: settings, the project template, export, release builds, and the `vs` command |
 | [`crates/vs_tests`](crates/vs_tests) | The differential test, its scripts and the game-side code they expect |
@@ -183,7 +183,7 @@ commands.spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::default(), Sp
 
 Without the `preview` feature, `ScriptsPlugin` adds each script's systems. With it, `ScriptsPlugin` adds `vs_bevy::VisualScriptPlugin` instead and gives every entity with `Spinner` a `VisualScript` pointing at `scripts/spinner.lua`. Each such entity gets its own Lua 5.4 state. `on_script_loaded` runs on the first frame the file is loaded, then `on_update` runs every frame in `Update`. A script that raises an error is logged and stopped until its file changes. Saving a file restarts every script that uses it, from a fresh state.
 
-The plugin embeds Lua through [`mlua`](https://github.com/mlua-rs/mlua) rather than [`bevy_mod_scripting`](https://github.com/makspll/bevy_mod_scripting). The API is small enough to bind by hand, and `bevy_mod_scripting` 0.22 and later require Bevy 0.20, which would break the wgpu match described below.
+The plugin embeds Lua through [`mlua`](https://github.com/mlua-rs/mlua) rather than [`bevy_mod_scripting`](https://github.com/makspll/bevy_mod_scripting). The API is small enough to bind by hand, and `bevy_mod_scripting` 0.22 and later require Bevy 0.20, while the games stay on Bevy 0.19 for now.
 
 ## Using the editor
 
@@ -229,9 +229,9 @@ The generated Lua expects the host to define these globals. `vs_bevy` provides t
 
 ## Versions and wgpu
 
-The editor uses gpui-ce 0.3.0, whose wgpu renderer depends on wgpu 29. Bevy 0.19 also uses wgpu 29, while Bevy 0.20 moved to wgpu 30. So **Bevy 0.19 is the version to pair with**, if a Bevy viewport should ever render inside the editor by sharing GPUI's wgpu device.
+The editor is built on [gpui-kit](https://github.com/longbridge/gpui-kit) 0.9, which bundles GPUI (`gpui-pre`, a snapshot of Zed's GPUI, pinned to an exact version), its platform layer, and the [gpui-component](https://github.com/longbridge/gpui-component) library. GPUI is updated by updating gpui-kit, not on its own.
 
-Two caveats apply. gpui-ce draws with wgpu on Linux and, optionally, on macOS; on Windows it draws with Direct3D 11, and its `custom-gpu` API (for drawing into the UI with your own wgpu code) isn't available there yet. The editor doesn't depend on any of that: it runs as its own process and talks to the game only through the `.lua` files it writes.
+`gpui-pre` 0.3.11 renders with wgpu 30 on Linux and the web; on Windows it uses its own native renderer, with no wgpu. Bevy 0.19, which the games and `vs_bevy` use, is on wgpu 29, and Bevy 0.20 on wgpu 30. So a Bevy viewport inside the editor that shares GPUI's wgpu device would need Bevy 0.20, and would only work where GPUI draws with wgpu. Nothing depends on that today: the editor runs as its own process and talks to the game only through the `.lua` files it writes.
 
 ## Next steps
 

@@ -129,8 +129,8 @@ pub fn create(projects_dir: &Path, name: &str) -> Result<Project> {
         std::fs::write(&path, contents).with_context(|| format!("writing {}", path.display()))?;
     }
     std::fs::write(root.join(MARKER), serde_json::to_string_pretty(&Marker { name: name.clone(), version: 1 })?)?;
-    // The editor's lock file pins versions known to work together (Bevy and gpui-ce on the same
-    // wgpu); Cargo drops the entries a project doesn't use.
+    // The editor's lock file pins the Bevy release and its dependencies that the editor's own
+    // crates are built and tested with; Cargo drops the entries a project doesn't use.
     let lock = editor.join("Cargo.lock");
     if lock.exists() {
         std::fs::copy(lock, root.join("Cargo.lock"))?;

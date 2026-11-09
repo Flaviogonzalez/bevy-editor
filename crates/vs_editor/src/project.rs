@@ -3,11 +3,11 @@
 
 use std::time::Duration;
 
-use gpui::{Context, Window};
+use gpui_kit::{Context, Window};
 use vs_project::Project;
 
 use crate::editor::{Dialog, Editor};
-use crate::tasks::{Task, Then};
+use crate::tasks::{Outcome, Task, Then};
 
 impl Editor {
     pub fn open_settings(&mut self) {
@@ -115,17 +115,30 @@ impl Editor {
         }
     }
 
+    /// Makes `project` current and loads its catalog of components into the editor-wide store,
+    /// which the compiler and the add-node menu read. Every change of project goes through here,
+    /// so the catalog always belongs to the open project. An unreadable catalog leaves the project
+    /// with only Bevy's common components; the error says why.
+    pub fn set_project(&mut self, project: Project) -> Result<(), String> {
+        let loaded = vs_graph::components::load_project(&project.root).map(|_| ());
+        if loaded.is_err() {
+            vs_graph::components::set_project(Vec::new());
+        }
+        self.project = Some(project);
+        loaded
+    }
+
     /// Makes `project` current and opens its first script.
     pub fn enter_project(&mut self, project: Project, window: &mut Window) {
         let first = project.scripts().into_iter().next();
-        if let Err(e) = vs_graph::components::load_project(&project.root) {
-            self.status = e;
-        }
-        self.project = Some(project);
+        let catalog = self.set_project(project);
         match first {
             Some(path) => self.open_path(path, window),
             None => {
                 *self = Self { graph: vs_graph::Graph::default(), path: None, ..self.reset() };
+                if let Err(e) = catalog {
+                    self.status = e;
+                }
                 self.update_title(window);
             }
         }
@@ -133,13 +146,13 @@ impl Editor {
 
     /// Saves the open script before a run, so the game sees what's on screen.
     fn save_for_run(&mut self, window: &mut Window) -> bool {
-        if !self.dirty {
+        if !self.history.is_dirty() {
             return true;
         }
         match self.path.clone() {
             Some(_) => {
                 self.save(window);
-                !self.dirty
+                !self.history.is_dirty()
             }
             None => {
                 self.status = "Save the script into the project first".into();
@@ -246,23 +259,32 @@ impl Editor {
     pub fn poll_task(&mut self) -> bool {
         let mut task = self.task.borrow_mut();
         let Some(t) = task.as_mut() else { return false };
-        let Some(success) = t.finished() else { return true };
+        let Some(outcome) = t.finished() else { return true };
         let then = t.then.take();
         let label = t.label.clone();
         drop(task);
-        self.status = match (success, then) {
-            (true, Some(Then::Package(project))) => match vs_project::package(&project) {
+        self.status = match (outcome, then) {
+            (Outcome::Succeeded, Some(Then::Package(project))) => match vs_project::package(&project) {
                 Ok(exe) => format!("Built {}. Its folder is ready to ship", exe.display()),
                 Err(e) => format!("The build finished but couldn't be packaged: {e}"),
             },
-            (true, Some(Then::Catalog(root))) => match vs_graph::components::load_project(&root) {
+            // The catalog is global to the editor: only load it if its project is still the open one.
+            (Outcome::Succeeded, Some(Then::Catalog(root))) if !self.is_current_project(&root) => {
+                format!("The catalog of {} was updated. Open that project to use it", root.display())
+            }
+            (Outcome::Succeeded, Some(Then::Catalog(root))) => match vs_graph::components::load_project(&root) {
                 Ok(n) => format!("Catalog updated: {n} component(s) from the game, besides Bevy's common ones"),
                 Err(e) => format!("The game wrote a catalog the editor can't read: {e}"),
             },
-            (true, None) => format!("{label} finished"),
-            (false, _) => format!("{label} failed: see the output panel"),
+            (Outcome::Succeeded, None) => format!("{label} finished"),
+            (Outcome::Failed, _) => format!("{label} failed: see the output panel"),
+            (Outcome::Stopped, _) => format!("{label} stopped"),
         };
         false
+    }
+
+    fn is_current_project(&self, root: &std::path::Path) -> bool {
+        self.project.as_ref().is_some_and(|p| p.root == root)
     }
 }
 

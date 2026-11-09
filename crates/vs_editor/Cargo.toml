@@ -4,10 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-# gpui-ce 0.3.0 renders through wgpu 29, the same major version Bevy 0.19 uses, so a Bevy
-# viewport can later share GPUI's device (see README).
-gpui = { package = "gpui-ce", version = "0.3.0" }
-gpui_platform = { package = "gpui_ce_platform", version = "0.3.0" }
+# GPUI (Zed's `gpui-pre` snapshot, re-exported at the crate root), its platform, and the
+# gpui-component library with default assets. gpui-kit pins the exact GPUI version.
+gpui_kit = { package = "gpui-kit", version = "0.9" }
 vs_graph.workspace = true
 vs_project = { path = "../vs_project" }
 rfd = "0.18"

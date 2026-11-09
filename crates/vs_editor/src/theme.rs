@@ -1,6 +1,6 @@
 //! Colors. One dark palette for now.
 
-use gpui::{Rgba, rgb};
+use gpui_kit::{Rgba, rgb};
 use vs_graph::PinType;
 
 pub fn canvas_bg() -> Rgba {

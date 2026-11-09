@@ -2,15 +2,16 @@
 
 use std::collections::BTreeMap;
 
-use gpui::{
+use gpui_kit::{
     Bounds, Context, Div, FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, PathBuilder, Rgba, ScrollWheelEvent, SharedString,
+    MouseMoveEvent, MouseUpEvent, PathBuilder, Rgba, ScrollEvent, SharedString,
     Window, canvas, div, point, prelude::*, px, rgba, size,
 };
 use vs_graph::{Compiled, NodeId, PinType, Severity, Side, Value, library};
 
 use crate::editor::{CodeView, Dialog, Drag, EditTarget, Editor};
 use crate::layout::{self, NodeLayout, Rect, V2};
+use crate::tasks::Outcome;
 use crate::theme;
 
 const MONO: &str = "Consolas";
@@ -76,7 +77,7 @@ impl Render for Editor {
     }
 }
 
-fn button(id: &'static str, label: &str) -> gpui::Stateful<Div> {
+fn button(id: &'static str, label: &str) -> gpui_kit::Stateful<Div> {
     div()
         .id(id)
         .px_2p5()
@@ -97,7 +98,7 @@ impl Editor {
             (0, w) => (format!("{w} warning{}", if w == 1 { "" } else { "s" }), theme::warning()),
             (e, _) => (format!("{e} error{}", if e == 1 { "" } else { "s" }), theme::error()),
         };
-        let title = format!("{}{}", self.file_name(), if self.dirty { " •" } else { "" });
+        let title = format!("{}{}", self.file_name(), if self.history.is_dirty() { " •" } else { "" });
 
         div()
             .h(px(40.0))
@@ -286,7 +287,7 @@ impl Editor {
                     cx.notify();
                 }),
             )
-            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| {
                 let dy = e.delta.pixel_delta(px(40.0)).y.as_f32();
                 this.scroll(this.to_local(e.position), dy);
                 cx.notify();
@@ -335,7 +336,7 @@ impl Editor {
                 width: (base + if lit { 0.8 } else { 0.0 }) * self.zoom.max(0.6),
             });
         }
-        if let Drag::Wire { anchor, side, cursor } = &self.drag
+        if let Drag::Wire { anchor, side, cursor, .. } = &self.drag
             && let Some(l) = find(anchor.node)
             && let Some(p) = l.pin_center(&anchor.pin, *side)
         {
@@ -557,7 +558,7 @@ impl Editor {
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| {
                 cx.stop_propagation();
                 let count = this.menu_entries().len();
                 if let Some(menu) = &mut this.menu {
@@ -678,8 +679,9 @@ impl Editor {
         let task = task.as_ref().expect("checked by the caller");
         let state = match task.finished() {
             None => "running",
-            Some(true) => "done",
-            Some(false) => "failed",
+            Some(Outcome::Succeeded) => "done",
+            Some(Outcome::Failed) => "failed",
+            Some(Outcome::Stopped) => "stopped",
         };
         section(&format!("Output · {} · {state}", task.label)).child(
             div()
@@ -1061,7 +1063,7 @@ fn section(title: &str) -> Div {
         )
 }
 
-fn field(id: SharedString, text: String, active: bool) -> gpui::Stateful<Div> {
+fn field(id: SharedString, text: String, active: bool) -> gpui_kit::Stateful<Div> {
     div()
         .id(id)
         .px_1p5()
@@ -1078,7 +1080,7 @@ fn field(id: SharedString, text: String, active: bool) -> gpui::Stateful<Div> {
         .child(text)
 }
 
-fn small_button(id: String, label: &str) -> gpui::Stateful<Div> {
+fn small_button(id: String, label: &str) -> gpui_kit::Stateful<Div> {
     div()
         .id(SharedString::from(id))
         .px_1p5()
@@ -1107,13 +1109,13 @@ fn pin_dot(center: V2, ty: PinType, connected: bool, z: f32) -> Div {
     if ty == PinType::Exec { dot.rounded(px(1.5 * z)) } else { dot.rounded_full() }
 }
 
-fn paint_scene(scene: &Scene, bounds: Bounds<gpui::Pixels>, window: &mut Window) {
+fn paint_scene(scene: &Scene, bounds: Bounds<gpui_kit::Pixels>, window: &mut Window) {
     let o = V2::new(bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
     let w = bounds.size.width.as_f32();
     let h = bounds.size.height.as_f32();
     let quad = |x: f32, y: f32, qw: f32, qh: f32, color: Rgba, window: &mut Window| {
         window.paint_quad(
-            PaintQuad::new(Bounds::new(point(px(x), px(y)), size(px(qw), px(qh)))).background(color),
+            gpui_kit::fill(Bounds::new(point(px(x), px(y)), size(px(qw), px(qh))), color),
         );
     };
 
@@ -1154,11 +1156,10 @@ fn paint_scene(scene: &Scene, bounds: Bounds<gpui::Pixels>, window: &mut Window)
 
     if let Some(sel) = &scene.selection {
         window.paint_quad(
-            PaintQuad::new(Bounds::new(
-                point(px(o.x + sel.min.x), px(o.y + sel.min.y)),
-                size(px(sel.w()), px(sel.h())),
-            ))
-            .background(rgba(0x4d8df722))
+            gpui_kit::fill(
+                Bounds::new(point(px(o.x + sel.min.x), px(o.y + sel.min.y)), size(px(sel.w()), px(sel.h()))),
+                rgba(0x4d8df722),
+            )
             .border_widths(px(1.0))
             .border_color(theme::accent()),
         );
