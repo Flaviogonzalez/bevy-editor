@@ -3,15 +3,17 @@
 use vs_graph::{Graph, Node, NodeId, PinDef, PinRef, PinType, Side};
 
 pub const NODE_W: f32 = 210.0;
-pub const HEADER_H: f32 = 26.0;
-pub const ROW_H: f32 = 22.0;
+pub const HEADER_H: f32 = 30.0;
+/// Space between the header and the first pin row.
+pub const PAD_TOP: f32 = 4.0;
+pub const ROW_H: f32 = 24.0;
 pub const PAD_BOTTOM: f32 = 8.0;
 pub const PIN_R: f32 = 5.0;
 /// How close, in graph units, the pointer has to be to grab a pin.
 pub const PIN_GRAB: f32 = 10.0;
 pub const FIELD_X: f32 = 72.0;
 pub const FIELD_W: f32 = 64.0;
-pub const FIELD_H: f32 = 16.0;
+pub const FIELD_H: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct V2 {
@@ -126,9 +128,9 @@ impl NodeLayout {
 pub fn layout(graph: &Graph, node: &Node) -> NodeLayout {
     let pins = graph.pins_of(node);
     let rows = pins.inputs.len().max(pins.outputs.len()).max(1);
-    let h = HEADER_H + rows as f32 * ROW_H + PAD_BOTTOM;
+    let h = HEADER_H + PAD_TOP + rows as f32 * ROW_H + PAD_BOTTOM;
     let rect = Rect::new(node.x, node.y, NODE_W, h);
-    let row_y = |i: usize| node.y + HEADER_H + i as f32 * ROW_H + ROW_H * 0.5;
+    let row_y = |i: usize| node.y + HEADER_H + PAD_TOP + i as f32 * ROW_H + ROW_H * 0.5;
 
     let mut fields = Vec::new();
     let inputs = pins

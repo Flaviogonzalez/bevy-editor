@@ -106,6 +106,8 @@ pub struct Editor {
     pub status: String,
     /// Last pointer position, canvas-local.
     pub mouse: V2,
+    /// What lies under the pointer, so the canvas can highlight the node or pin it would act on.
+    pub hover: Hit,
     /// The canvas origin in window coordinates and its size, written while painting.
     pub canvas: Rc<Cell<(V2, V2)>>,
     pub config: vs_project::Config,
@@ -138,6 +140,7 @@ impl Editor {
             bottom_tab: BottomTab::Code,
             status: String::new(),
             mouse: V2::default(),
+            hover: Hit::Empty,
             canvas: Rc::new(Cell::new((V2::default(), V2::new(800.0, 600.0)))),
             config: vs_project::Config::load(),
             project: None,
@@ -276,6 +279,9 @@ impl Editor {
 
     pub fn mouse_move(&mut self, local: V2, any_button_held: bool) -> bool {
         self.mouse = local;
+        let hover = layout::hit_test(&self.layouts(), self.to_graph(local));
+        let hover_changed = hover != self.hover;
+        self.hover = hover;
         if !any_button_held && !matches!(self.drag, Drag::None) {
             // The button went up somewhere we didn't see, such as outside the window: keep what
             // the drag already changed, but don't act on a drop we didn't see.
@@ -284,7 +290,7 @@ impl Editor {
         }
         let g = self.to_graph(local);
         match &mut self.drag {
-            Drag::None => return false,
+            Drag::None => return hover_changed,
             Drag::Pan { last, moved, .. } => {
                 let delta = local - *last;
                 if delta.x.abs() + delta.y.abs() > 0.0 {
@@ -740,6 +746,7 @@ impl Editor {
             bottom_tab: self.bottom_tab,
             status: String::new(),
             mouse: self.mouse,
+            hover: Hit::Empty,
             canvas: self.canvas.clone(),
             config: self.config.clone(),
             project: self.project.clone(),
