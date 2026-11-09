@@ -1,0 +1,24 @@
+[
+  {
+    "name": "Wobble",
+    "rust_path": "crate::Wobble",
+    "fields": [
+      {
+        "path": "amount",
+        "type": "Number"
+      },
+      {
+        "path": "axis",
+        "type": "Vec3"
+      },
+      {
+        "path": "tint",
+        "type": "Color"
+      },
+      {
+        "path": "active",
+        "type": "Bool"
+      }
+    ]
+  }
+]

@@ -1,0 +1,18 @@
+[package]
+name = "vs_bevy"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+# Bevy 0.19 renders with wgpu 29, the same major version as gpui-ce 0.3 (see README).
+bevy = { version = "0.19.1", default-features = false, features = ["std", "bevy_asset", "bevy_log", "bevy_color", "keyboard", "mouse", "bevy_window"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+mlua = { version = "0.12.2", features = ["lua54", "vendored"] }
+thiserror = "2"
+vs_nodes = { path = "../vs_nodes", features = ["lua"] }
+
+[dev-dependencies]
+bevy = { version = "0.19.1", features = ["file_watcher"] }
+vs_graph.workspace = true

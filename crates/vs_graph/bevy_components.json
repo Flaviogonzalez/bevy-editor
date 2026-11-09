@@ -1,0 +1,352 @@
+[
+  {
+    "name": "Transform",
+    "rust_path": "Transform",
+    "fields": [
+      {
+        "path": "translation",
+        "type": "Vec3"
+      },
+      {
+        "path": "rotation",
+        "type": "Quat"
+      },
+      {
+        "path": "scale",
+        "type": "Vec3"
+      }
+    ]
+  },
+  {
+    "name": "PointLight",
+    "rust_path": "PointLight",
+    "fields": [
+      {
+        "path": "color",
+        "type": "Color"
+      },
+      {
+        "path": "intensity",
+        "type": "Number"
+      },
+      {
+        "path": "range",
+        "type": "Number"
+      },
+      {
+        "path": "radius",
+        "type": "Number"
+      },
+      {
+        "path": "shadow_maps_enabled",
+        "type": "Bool"
+      },
+      {
+        "path": "contact_shadows_enabled",
+        "type": "Bool"
+      },
+      {
+        "path": "affects_lightmapped_mesh_diffuse",
+        "type": "Bool"
+      },
+      {
+        "path": "shadow_depth_bias",
+        "type": "Number"
+      },
+      {
+        "path": "shadow_normal_bias",
+        "type": "Number"
+      },
+      {
+        "path": "shadow_map_near_z",
+        "type": "Number"
+      }
+    ]
+  },
+  {
+    "name": "SpotLight",
+    "rust_path": "SpotLight",
+    "fields": [
+      {
+        "path": "color",
+        "type": "Color"
+      },
+      {
+        "path": "intensity",
+        "type": "Number"
+      },
+      {
+        "path": "range",
+        "type": "Number"
+      },
+      {
+        "path": "radius",
+        "type": "Number"
+      },
+      {
+        "path": "shadow_maps_enabled",
+        "type": "Bool"
+      },
+      {
+        "path": "contact_shadows_enabled",
+        "type": "Bool"
+      },
+      {
+        "path": "affects_lightmapped_mesh_diffuse",
+        "type": "Bool"
+      },
+      {
+        "path": "shadow_depth_bias",
+        "type": "Number"
+      },
+      {
+        "path": "shadow_normal_bias",
+        "type": "Number"
+      },
+      {
+        "path": "shadow_map_near_z",
+        "type": "Number"
+      },
+      {
+        "path": "outer_angle",
+        "type": "Number"
+      },
+      {
+        "path": "inner_angle",
+        "type": "Number"
+      }
+    ]
+  },
+  {
+    "name": "DirectionalLight",
+    "rust_path": "DirectionalLight",
+    "fields": [
+      {
+        "path": "color",
+        "type": "Color"
+      },
+      {
+        "path": "illuminance",
+        "type": "Number"
+      },
+      {
+        "path": "shadow_maps_enabled",
+        "type": "Bool"
+      },
+      {
+        "path": "contact_shadows_enabled",
+        "type": "Bool"
+      },
+      {
+        "path": "affects_lightmapped_mesh_diffuse",
+        "type": "Bool"
+      },
+      {
+        "path": "shadow_depth_bias",
+        "type": "Number"
+      },
+      {
+        "path": "shadow_normal_bias",
+        "type": "Number"
+      }
+    ]
+  },
+  {
+    "name": "AmbientLight",
+    "rust_path": "AmbientLight",
+    "fields": [
+      {
+        "path": "color",
+        "type": "Color"
+      },
+      {
+        "path": "brightness",
+        "type": "Number"
+      },
+      {
+        "path": "affects_lightmapped_meshes",
+        "type": "Bool"
+      }
+    ]
+  },
+  {
+    "name": "DistanceFog",
+    "rust_path": "DistanceFog",
+    "fields": [
+      {
+        "path": "color",
+        "type": "Color"
+      },
+      {
+        "path": "directional_light_color",
+        "type": "Color"
+      },
+      {
+        "path": "directional_light_exponent",
+        "type": "Number"
+      }
+    ]
+  },
+  {
+    "name": "Camera",
+    "rust_path": "Camera",
+    "fields": [
+      {
+        "path": "is_active",
+        "type": "Bool"
+      },
+      {
+        "path": "invert_culling",
+        "type": "Bool"
+      }
+    ]
+  },
+  {
+    "name": "Sprite",
+    "rust_path": "Sprite",
+    "fields": [
+      {
+        "path": "color",
+        "type": "Color"
+      },
+      {
+        "path": "flip_x",
+        "type": "Bool"
+      },
+      {
+        "path": "flip_y",
+        "type": "Bool"
+      }
+    ]
+  },
+  {
+    "name": "Text2d",
+    "rust_path": "Text2d",
+    "fields": [
+      {
+        "path": "0",
+        "type": "String"
+      }
+    ]
+  },
+  {
+    "name": "Text",
+    "rust_path": "Text",
+    "fields": [
+      {
+        "path": "0",
+        "type": "String"
+      }
+    ]
+  },
+  {
+    "name": "TextColor",
+    "rust_path": "TextColor",
+    "fields": [
+      {
+        "path": "0",
+        "type": "Color"
+      }
+    ]
+  },
+  {
+    "name": "TextShadow",
+    "rust_path": "TextShadow",
+    "fields": [
+      {
+        "path": "offset.x",
+        "type": "Number"
+      },
+      {
+        "path": "offset.y",
+        "type": "Number"
+      },
+      {
+        "path": "color",
+        "type": "Color"
+      }
+    ]
+  },
+  {
+    "name": "BackgroundColor",
+    "rust_path": "BackgroundColor",
+    "fields": [
+      {
+        "path": "0",
+        "type": "Color"
+      }
+    ]
+  },
+  {
+    "name": "BorderColor",
+    "rust_path": "BorderColor",
+    "fields": [
+      {
+        "path": "top",
+        "type": "Color"
+      },
+      {
+        "path": "right",
+        "type": "Color"
+      },
+      {
+        "path": "bottom",
+        "type": "Color"
+      },
+      {
+        "path": "left",
+        "type": "Color"
+      }
+    ]
+  },
+  {
+    "name": "ImageNode",
+    "rust_path": "ImageNode",
+    "fields": [
+      {
+        "path": "color",
+        "type": "Color"
+      },
+      {
+        "path": "flip_x",
+        "type": "Bool"
+      },
+      {
+        "path": "flip_y",
+        "type": "Bool"
+      }
+    ]
+  },
+  {
+    "name": "Outline",
+    "rust_path": "Outline",
+    "fields": [
+      {
+        "path": "color",
+        "type": "Color"
+      }
+    ]
+  },
+  {
+    "name": "Node",
+    "rust_path": "Node",
+    "fields": [
+      {
+        "path": "scrollbar_width",
+        "type": "Number"
+      },
+      {
+        "path": "overflow_clip_margin.margin",
+        "type": "Number"
+      },
+      {
+        "path": "flex_grow",
+        "type": "Number"
+      },
+      {
+        "path": "flex_shrink",
+        "type": "Number"
+      }
+    ]
+  }
+]

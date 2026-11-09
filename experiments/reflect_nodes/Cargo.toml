@@ -1,0 +1,18 @@
+[package]
+name = "reflect_nodes"
+version = "0.1.0"
+edition = "2024"
+
+# A separate workspace: this is an experiment, not part of the main crates.
+[workspace]
+
+[dependencies]
+bevy_reflect = { version = "0.19.1", features = ["functions"] }
+mlua = { version = "0.12.2", features = ["lua54", "vendored"] }
+quote = "1"
+proc-macro2 = "1"
+syn = { version = "2", features = ["full"] }
+prettyplease = "0.2"
+
+[dev-dependencies]
+proptest = "1"

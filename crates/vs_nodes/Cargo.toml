@@ -1,0 +1,17 @@
+# reflect_auto_register: Bevy's default features turn it on for the shared Reflect derive macro, so
+# vs_nodes needs it too when it is built as a build dependency (vs_tests/build.rs, a project's build.rs).
+[package]
+name = "vs_nodes"
+version = "0.1.0"
+edition.workspace = true
+
+# The single definition of every node. The editor reads its catalog, the Lua preview calls its
+# functions through typed bindings, and generated Rust calls them directly.
+
+[features]
+# Typed Lua bindings for the preview runtime. The editor doesn't need them.
+lua = ["dep:mlua"]
+
+[dependencies]
+bevy = { version = "0.19.1", default-features = false, features = ["std", "bevy_log", "bevy_color", "keyboard", "mouse", "reflect_functions", "reflect_auto_register"] }
+mlua = { version = "0.12.2", features = ["lua54", "vendored"], optional = true }

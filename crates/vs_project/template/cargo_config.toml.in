@@ -1,0 +1,5 @@
+# Every project in this folder builds into the same target directory, so Bevy compiles once.
+# Six jobs keep a full Bevy build from taking over the machine.
+[build]
+jobs = 6
+target-dir = "{{target}}"

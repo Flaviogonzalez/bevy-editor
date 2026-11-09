@@ -1,0 +1,25 @@
+[package]
+name = "{{name}}"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Development: scripts run from assets/scripts and reload when the editor saves them.
+preview = ["dep:vs_bevy"]
+
+[dependencies]
+# file_watcher reloads scripts when the editor saves them. reflect_functions matches what the
+# script compiler (a build dependency) needs from Bevy's shared Reflect derive.
+bevy = { version = "0.19.1", features = ["file_watcher", "reflect_functions"] }
+vs_bevy = { path = "{{editor}}/crates/vs_bevy", optional = true }
+
+[build-dependencies]
+vs_graph = { path = "{{editor}}/crates/vs_graph" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[workspace]

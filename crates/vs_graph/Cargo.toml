@@ -1,0 +1,17 @@
+[package]
+name = "vs_graph"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+vs_nodes = { path = "../vs_nodes" }
+quote = "1"
+proc-macro2 = "1"
+syn = { version = "2", features = ["full", "visit-mut"] }
+prettyplease = "0.2"
+
+[dev-dependencies]
+vs_nodes = { path = "../vs_nodes", features = ["lua"] }
+mlua = { version = "0.12.2", features = ["lua54", "vendored"] }

@@ -1,0 +1,3 @@
+# Half the machine's threads: a full Bevy build with 16 rustc jobs at once froze the PC.
+[build]
+jobs = 6

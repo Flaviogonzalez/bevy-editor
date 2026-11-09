@@ -1,0 +1,10 @@
+[package]
+name = "hotpatch_probe"
+version = "0.1.0"
+edition = "2024"
+
+# A separate workspace, so the `hotpatching` feature doesn't leak into the main crates' builds.
+[workspace]
+
+[dependencies]
+bevy = { version = "0.19.1", features = ["hotpatching"] }
