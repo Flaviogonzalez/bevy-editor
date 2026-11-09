@@ -1,6 +1,6 @@
 //! Node geometry in graph units, shared by drawing and hit testing so both always agree.
 
-use vs_graph::{Graph, Node, NodeId, PinDef, PinRef, PinType, Side};
+use vs_graph::{ComponentDef, Graph, Node, NodeId, PinDef, PinRef, PinType, Side};
 
 pub const NODE_W: f32 = 210.0;
 pub const HEADER_H: f32 = 30.0;
@@ -14,6 +14,8 @@ pub const PIN_GRAB: f32 = 10.0;
 pub const FIELD_X: f32 = 72.0;
 pub const FIELD_W: f32 = 64.0;
 pub const FIELD_H: f32 = 18.0;
+/// A component card is wider than a node: each row holds a name, a value and a type.
+pub const CARD_W: f32 = 270.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct V2 {
@@ -109,6 +111,20 @@ pub struct NodeLayout {
     pub outputs: Vec<PinLayout>,
     /// Inline value fields of unconnected data inputs: (pin name, rect).
     pub fields: Vec<(String, Rect)>,
+    /// The clickable parts of a component card; empty for other nodes.
+    pub parts: Vec<(CardPart, Rect)>,
+}
+
+/// A clickable part of a component card. Field indices are positions in its `fields`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardPart {
+    Name,
+    FieldName(usize),
+    Value(usize),
+    /// The type label: clicking it switches the field to the next type.
+    Type(usize),
+    Remove(usize),
+    AddField,
 }
 
 impl NodeLayout {
@@ -126,6 +142,9 @@ impl NodeLayout {
 }
 
 pub fn layout(graph: &Graph, node: &Node) -> NodeLayout {
+    if let Some(def) = &node.component {
+        return card_layout(node, def);
+    }
     let pins = graph.pins_of(node);
     let rows = pins.inputs.len().max(pins.outputs.len()).max(1);
     let h = HEADER_H + PAD_TOP + rows as f32 * ROW_H + PAD_BOTTOM;
@@ -162,13 +181,34 @@ pub fn layout(graph: &Graph, node: &Node) -> NodeLayout {
         })
         .collect();
 
-    NodeLayout { id: node.id, rect, inputs, outputs, fields }
+    NodeLayout { id: node.id, rect, inputs, outputs, fields, parts: Vec::new() }
+}
+
+/// A component card: the name, a row per field (name, value, type, remove) and a row to add a
+/// field. It has no pins, since it's data rather than logic.
+fn card_layout(node: &Node, def: &ComponentDef) -> NodeLayout {
+    let rows = def.fields.len() + 2;
+    let h = HEADER_H + PAD_TOP + rows as f32 * ROW_H + PAD_BOTTOM;
+    let rect = Rect::new(node.x, node.y, CARD_W, h);
+    let top = |row: usize| node.y + HEADER_H + PAD_TOP + row as f32 * ROW_H + (ROW_H - FIELD_H) * 0.5;
+    let x = |dx: f32| node.x + dx;
+    let mut parts = vec![(CardPart::Name, Rect::new(x(10.0), top(0), CARD_W - 20.0, FIELD_H))];
+    for i in 0..def.fields.len() {
+        let y = top(i + 1);
+        parts.push((CardPart::FieldName(i), Rect::new(x(10.0), y, 82.0, FIELD_H)));
+        parts.push((CardPart::Value(i), Rect::new(x(96.0), y, 108.0, FIELD_H)));
+        parts.push((CardPart::Type(i), Rect::new(x(208.0), y, 36.0, FIELD_H)));
+        parts.push((CardPart::Remove(i), Rect::new(x(248.0), y, 14.0, FIELD_H)));
+    }
+    parts.push((CardPart::AddField, Rect::new(x(10.0), top(def.fields.len() + 1), 90.0, FIELD_H)));
+    NodeLayout { id: node.id, rect, inputs: Vec::new(), outputs: Vec::new(), fields: Vec::new(), parts }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Hit {
     Pin(PinRef, Side),
     Field(NodeId, String),
+    Card(NodeId, CardPart),
     Header(NodeId),
     Body(NodeId),
     Empty,
@@ -190,6 +230,11 @@ pub fn hit_test(layouts: &[NodeLayout], p: V2) -> Hit {
         for (pin, rect) in &l.fields {
             if rect.contains(p) {
                 return Hit::Field(l.id, pin.clone());
+            }
+        }
+        for (part, rect) in &l.parts {
+            if rect.contains(p) {
+                return Hit::Card(l.id, *part);
             }
         }
         if l.header().contains(p) {

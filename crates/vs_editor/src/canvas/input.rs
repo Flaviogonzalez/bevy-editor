@@ -5,10 +5,10 @@
 //! These are `Editor` methods rather than `CanvasState` ones because a click can also start a
 //! text edit or report on the status line.
 
-use vs_graph::{PinRef, Side, Value};
+use vs_graph::{NodeId, PinRef, Side, Value};
 
 use super::Drag;
-use super::layout::{self, Hit, Rect, V2};
+use super::layout::{self, CardPart, Hit, Rect, V2};
 use crate::editor::{EditTarget, Editing, Editor};
 
 impl Editor {
@@ -51,6 +51,10 @@ impl Editor {
                     });
                 }
             }
+            Hit::Card(id, part) => {
+                self.doc.select_only(id);
+                self.click_card(id, part);
+            }
             Hit::Header(id) | Hit::Body(id) => {
                 if additive {
                     if !self.doc.selected.remove(&id) {
@@ -72,13 +76,40 @@ impl Editor {
         }
     }
 
+    /// A click on part of a component card: the name, a field's name and value start a text
+    /// edit (a bool value flips instead), the type label switches to the next type, and the
+    /// buttons remove a field or add one, whose name is then edited right away.
+    fn click_card(&mut self, id: NodeId, part: CardPart) {
+        let value = |doc: &crate::document::Document, i: usize| {
+            doc.graph.node(id).and_then(|n| n.component.as_ref()).and_then(|d| d.fields.get(i)).map(|f| f.value.clone())
+        };
+        match part {
+            CardPart::Name => self.start_edit(EditTarget::ComponentName(id)),
+            CardPart::FieldName(i) => self.start_edit(EditTarget::ComponentField(id, i)),
+            CardPart::Value(i) => match value(&self.doc, i) {
+                Some(Value::Bool(_)) => self.doc.toggle_component_value(id, i),
+                Some(_) => self.start_edit(EditTarget::ComponentValue(id, i)),
+                None => {}
+            },
+            CardPart::Type(i) => self.doc.cycle_component_field_type(id, i),
+            CardPart::Remove(i) => {
+                self.doc.remove_component_field(id, i);
+            }
+            CardPart::AddField => {
+                self.doc.add_component_field(id);
+                let last = self.doc.graph.node(id).and_then(|n| n.component.as_ref()).map_or(0, |d| d.fields.len());
+                self.name_new(EditTarget::ComponentField(id, last.saturating_sub(1)));
+            }
+        }
+    }
+
     pub fn right_down(&mut self, local: V2) {
         self.commit_edit();
         self.canvas.menu = None;
         let g = self.doc.to_graph(local);
         let layouts = self.doc.layouts();
         let on_node = match layout::hit_test(&layouts, g) {
-            Hit::Header(id) | Hit::Body(id) | Hit::Field(id, _) => Some(id),
+            Hit::Header(id) | Hit::Body(id) | Hit::Field(id, _) | Hit::Card(id, _) => Some(id),
             Hit::Pin(..) | Hit::Empty => None,
         };
         if let Some(id) = on_node

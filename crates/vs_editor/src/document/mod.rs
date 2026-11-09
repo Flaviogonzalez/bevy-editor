@@ -8,12 +8,13 @@
 //!
 //! Depends on `canvas::layout` for node geometry, which framing and hit tests share.
 
+pub mod components;
 pub mod history;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use vs_graph::{Graph, NodeId, PinType, Value, Variable};
+use vs_graph::{Graph, NodeId, Value, Variable};
 
 use crate::canvas::layout::{self, NodeLayout, V2};
 use history::History;
@@ -179,6 +180,7 @@ impl Document {
         self.checkpoint();
         let ids: Vec<NodeId> = self.selected.iter().copied().collect();
         let copies = self.graph.duplicate(&ids, 30.0, 30.0);
+        self.rename_copied_cards(&copies);
         self.selected = copies.into_iter().collect();
     }
 
@@ -221,14 +223,7 @@ impl Document {
     /// value of the new type.
     pub fn cycle_variable_type(&mut self, i: usize) {
         let Some(var) = self.graph.variables.get(i) else { return };
-        let ty = match var.value.ty() {
-            PinType::Number => PinType::Bool,
-            PinType::Bool => PinType::String,
-            PinType::String => PinType::Vec3,
-            PinType::Vec3 => PinType::Quat,
-            PinType::Quat => PinType::Color,
-            _ => PinType::Number,
-        };
+        let ty = components::next_type(var.value.ty());
         let value = Value::default_for(ty).expect("data types have defaults");
         let name = var.name.clone();
         self.checkpoint();

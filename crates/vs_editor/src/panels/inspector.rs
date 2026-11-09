@@ -46,7 +46,8 @@ impl Editor {
             (None, Some(name)) => name.clone(),
             (None, None) => "(unnamed)".into(),
         };
-        let title = match node.var.as_ref().or(node.field.as_ref()) {
+        let declared = node.component.as_ref().map(|c| &c.name);
+        let title = match node.var.as_ref().or(node.field.as_ref()).or(declared) {
             Some(subject) => format!("{} {subject}", def.title),
             None => def.title.to_string(),
         };
@@ -74,14 +75,15 @@ impl Editor {
                     .child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(def.category))
                     .child(div().text_color(theme::dim(cx)).child(def.description)),
             )
-            .child(
-                group("Name", None, cx).child(field("node-name".into(), name, editing.is_some(), cx).on_click(
+            // A node's name names its value in exported Rust; a card is named on the canvas.
+            .when(!def.is_definition(), |d| {
+                d.child(group("Name", None, cx).child(field("node-name".into(), name, editing.is_some(), cx).on_click(
                     cx.listener(move |this, _, _, cx| {
                         this.start_edit(EditTarget::NodeName(id));
                         cx.notify();
                     }),
-                )),
-            )
+                )))
+            })
             .when(!pins.inputs.is_empty(), |d| {
                 d.child(group("Inputs", None, cx).children(pins.inputs.iter().map(pin_row)))
             })

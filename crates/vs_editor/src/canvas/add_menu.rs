@@ -7,7 +7,7 @@ use gpui_kit::{
     Context, IntoElement, MouseButton, MouseDownEvent, ScrollEvent, div, prelude::*, px,
 };
 
-use crate::editor::Editor;
+use crate::editor::{EditTarget, Editor};
 use crate::theme;
 use super::MENU_ROWS;
 use super::layout::{self, V2};
@@ -142,11 +142,15 @@ impl Editor {
         let filter = menu.filter.to_lowercase();
         let mut entries = Vec::new();
         for def in library::all() {
-            // The component card needs its own drawing and editing on the canvas first.
             if def.is_definition() {
-                continue;
-            }
-            if def.is_variable() {
+                entries.push(MenuEntry {
+                    kind: def.kind,
+                    var: None,
+                    field: None,
+                    label: format!("New {}", def.title),
+                    category: def.category,
+                });
+            } else if def.is_variable() {
                 for var in &self.doc.graph.variables {
                     entries.push(MenuEntry {
                         kind: def.kind,
@@ -157,7 +161,11 @@ impl Editor {
                     });
                 }
             } else if def.is_field() {
-                for component in vs_graph::components::all() {
+                // The script's own cards come first: they may be unsaved, or renamed since the
+                // catalog last read this file.
+                let own: Vec<_> = self.doc.graph.defined_components().map(vs_graph::components::declared_info).collect();
+                let catalog = vs_graph::components::all().into_iter().filter(|c| !own.iter().any(|o| o.name == c.name));
+                for component in own.iter().cloned().chain(catalog) {
                     for f in &component.fields {
                         let field = format!("{}.{}", component.name, f.path);
                         entries.push(MenuEntry {
@@ -218,6 +226,12 @@ impl Editor {
 
     pub fn place(&mut self, entry: &MenuEntry) {
         let Some(menu) = self.canvas.menu.take() else { return };
+        if library::find(entry.kind).is_some_and(|d| d.is_definition()) {
+            // No pins, so no wire opened the menu for it (see `fits`).
+            let id = self.doc.add_component(menu.graph_at);
+            self.name_new(EditTarget::ComponentName(id));
+            return;
+        }
         self.doc.checkpoint();
         let mut at = menu.graph_at;
         if let Some((_, Side::Input)) = &menu.wire {

@@ -22,6 +22,12 @@ pub enum EditTarget {
     NodeName(NodeId),
     VarName(usize),
     VarValue(usize),
+    /// A component card's name.
+    ComponentName(NodeId),
+    /// The name of field `usize` on a component card.
+    ComponentField(NodeId, usize),
+    /// The starting value of field `usize` on a component card.
+    ComponentValue(NodeId, usize),
 }
 
 pub struct Editing {
@@ -134,6 +140,23 @@ impl Editor {
                     None => self.chrome.status = format!("`{}` isn't a valid value", edit.buffer),
                 }
             }
+            // An empty name keeps the one there: see `name_new`.
+            EditTarget::ComponentName(_) | EditTarget::ComponentField(..) if edit.buffer.trim().is_empty() => {}
+            EditTarget::ComponentName(id) => {
+                if let Err(e) = self.doc.rename_component(id, &edit.buffer) {
+                    self.chrome.status = e;
+                }
+            }
+            EditTarget::ComponentField(id, i) => {
+                if let Err(e) = self.doc.rename_component_field(id, i, &edit.buffer) {
+                    self.chrome.status = e;
+                }
+            }
+            EditTarget::ComponentValue(id, i) => {
+                if let Err(e) = self.doc.set_component_value(id, i, &edit.buffer) {
+                    self.chrome.status = e;
+                }
+            }
         }
     }
 
@@ -153,8 +176,27 @@ impl Editor {
             EditTarget::VarValue(i) => {
                 self.doc.graph.variables.get(*i).map(|v| v.value.display()).unwrap_or_default()
             }
+            EditTarget::ComponentName(id) => self.card_text(*id, |d| d.name.clone()),
+            EditTarget::ComponentField(id, i) => {
+                self.card_text(*id, |d| d.fields.get(*i).map(|f| f.name.clone()).unwrap_or_default())
+            }
+            EditTarget::ComponentValue(id, i) => {
+                self.card_text(*id, |d| d.fields.get(*i).map(|f| f.value.display()).unwrap_or_default())
+            }
         };
         self.editing = Some(Editing { target, buffer });
+    }
+
+    /// Starts naming something just added under a placeholder name (a card, a field): the
+    /// buffer starts empty, so typing replaces the placeholder, and Enter on nothing keeps it.
+    pub fn name_new(&mut self, target: EditTarget) {
+        self.commit_edit();
+        self.editing = Some(Editing { target, buffer: String::new() });
+    }
+
+    /// Something read from component card `id`, or nothing when `id` isn't a card.
+    fn card_text(&self, id: NodeId, read: impl Fn(&vs_graph::ComponentDef) -> String) -> String {
+        self.doc.graph.node(id).and_then(|n| n.component.as_ref()).map(read).unwrap_or_default()
     }
 
     // Files ------------------------------------------------------------------------------------
