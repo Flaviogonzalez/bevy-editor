@@ -3,12 +3,13 @@
 use std::collections::BTreeMap;
 
 use gpui_kit::{
-    App, Bounds, Context, Div, FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    Anchor, App, Bounds, Context, Div, FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PathBuilder, Hsla, ScrollEvent, SharedString,
     Window, canvas, div, point, prelude::*, px, rgba, size,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenu};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{Disableable, Selectable, Sizable};
 use gpui_kit::component::empty::{
     Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
@@ -17,7 +18,7 @@ use gpui_kit::component::{Icon, IconName};
 use vs_graph::{Compiled, NodeId, PinType, Severity, Side, Value, library};
 
 use crate::actions;
-use crate::editor::{CodeView, Dialog, Drag, EditTarget, Editor};
+use crate::editor::{BottomTab, CodeView, Dialog, Drag, EditTarget, Editor};
 use crate::layout::{self, NodeLayout, Rect, V2};
 use crate::tasks::Outcome;
 use crate::theme;
@@ -69,8 +70,17 @@ impl Render for Editor {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.canvas_area(&layouts, &compiled, cx))
-                    .child(self.side_panel(&compiled, cx)),
+                    .child(self.explorer(cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(self.canvas_area(&layouts, &compiled, cx))
+                            .when(self.show_bottom_panel, |d| d.child(self.bottom_panel(&compiled, cx))),
+                    )
+                    .child(self.inspector(cx)),
             )
             .when(self.dialog.is_some(), |d| d.child(self.dialog_element(cx)))
             .child(
@@ -120,8 +130,8 @@ struct MenuState {
     project: bool,
     /// A preview or build is running.
     running: bool,
-    /// The code panel is showing.
-    code: bool,
+    /// The panel under the canvas is showing.
+    panel: bool,
 }
 
 fn file_menu(menu: PopupMenu, _: MenuState) -> PopupMenu {
@@ -150,7 +160,7 @@ fn view_menu(menu: PopupMenu, state: MenuState) -> PopupMenu {
     menu.menu("Add node…", Box::new(actions::AddNode))
         .menu("Frame all", Box::new(actions::FrameAll))
         .separator()
-        .menu_with_check("Code panel", state.code, Box::new(actions::ToggleCode))
+        .menu_with_check("Bottom panel", state.panel, Box::new(actions::ToggleBottomPanel))
 }
 
 fn project_menu(menu: PopupMenu, state: MenuState) -> PopupMenu {
@@ -175,7 +185,8 @@ impl Editor {
             (0, w) => (format!("{w} warning{}", if w == 1 { "" } else { "s" }), theme::warning(cx)),
             (e, _) => (format!("{e} error{}", if e == 1 { "" } else { "s" }), theme::error(cx)),
         };
-        let state = MenuState { project: self.project.is_some(), running: self.task_running(), code: self.show_code };
+        let state =
+            MenuState { project: self.project.is_some(), running: self.task_running(), panel: self.show_bottom_panel };
         let focus = self.focus.clone();
         let menu = move |id: &'static str, label: &'static str, items: fn(PopupMenu, MenuState) -> PopupMenu| {
             let focus = focus.clone();
@@ -212,8 +223,8 @@ impl Editor {
             .child(icon_button("tb-redo", IconName::Redo, "Redo", &actions::Redo))
             .child(icon_button("tb-frame", IconName::Frame, "Frame all", &actions::FrameAll))
             .child(
-                icon_button("tb-code", IconName::PanelRight, "Code panel", &actions::ToggleCode)
-                    .selected(state.code),
+                icon_button("tb-panel", IconName::PanelBottom, "Bottom panel", &actions::ToggleBottomPanel)
+                    .selected(state.panel),
             )
             .child(div().flex_1())
             .when(state.project, |d| {
@@ -308,7 +319,7 @@ impl Editor {
         let mut area = div()
             .id("canvas")
             .flex_1()
-            .h_full()
+            .min_h_0()
             .relative()
             .overflow_hidden()
             .bg(theme::canvas_bg(cx))
@@ -721,37 +732,77 @@ impl Editor {
 
     // Side panel -------------------------------------------------------------------------------
 
-    fn side_panel(&self, compiled: &Compiled, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("side-panel")
-            .w(px(340.0))
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(theme::panel_bg(cx))
-            .border_l_1()
-            .border_color(theme::border(cx))
-            .overflow_y_scroll()
-            .when(self.project.is_some(), |d| d.child(self.project_section(cx)))
-            .when(self.task.borrow().is_some(), |d| d.child(self.output_section(cx)))
-            .child(self.selection_section(cx))
-            .child(self.variables_section(cx))
-            .child(self.problems_section(compiled, cx))
-            .when(self.show_code, |d| d.child(self.code_section(compiled, cx)))
+    // Panels -----------------------------------------------------------------------------------
+
+    /// The left panel: what you navigate and declare. The open project (its scripts and its
+    /// catalog of components), then the graph's variables.
+    fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        panel("explorer", cx)
+            .w(px(272.0))
+            .border_r_1()
+            .child(panel_title("Explorer", cx))
+            .child(self.project_group(cx))
+            .child(self.variables_group(cx))
     }
 
-    fn project_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let project = self.project.as_ref().expect("checked by the caller");
+    /// The right panel: what you edit. The selected node, what it does, its name and its pins.
+    fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        panel("inspector", cx)
+            .w(px(300.0))
+            .border_l_1()
+            .child(panel_title("Inspector", cx))
+            .child(self.node_details(cx))
+    }
+
+    fn project_group(&self, cx: &mut Context<Self>) -> Div {
+        let Some(project) = self.project.as_ref() else {
+            return group("Project", None, cx)
+                .child(
+                    div()
+                        .text_color(theme::dim(cx))
+                        .child("No project open. A project is a Bevy game whose scripts you edit here."),
+                )
+                .child(
+                    div()
+                        .pt_1()
+                        .flex()
+                        .gap_1()
+                        .child(
+                            Button::new("explorer-open-project")
+                                .outline()
+                                .xsmall()
+                                .tab_stop(false)
+                                .icon(IconName::FolderOpen)
+                                .label("Open project")
+                                .on_click(dispatch(actions::OpenProject)),
+                        )
+                        .child(
+                            Button::new("explorer-new-project")
+                                .ghost()
+                                .xsmall()
+                                .tab_stop(false)
+                                .icon(IconName::Plus)
+                                .label("New project")
+                                .on_click(dispatch(actions::NewProject)),
+                        ),
+                );
+        };
         let rows = project.scripts().into_iter().enumerate().map(|(i, path)| {
             let open = self.path.as_ref() == Some(&path);
             let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             div()
                 .id(("script", i))
-                .px_1()
-                .rounded_sm()
-                .when(open, |d| d.bg(theme::button_bg(cx)).font_weight(FontWeight::SEMIBOLD))
-                .hover(|s| s.bg(theme::button_hover(cx)))
+                .h(px(26.0))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .text_color(if open { theme::text(cx) } else { theme::dim(cx) })
+                .when(open, |d| d.bg(theme::highlight(cx)))
+                .hover(|s| s.bg(theme::button_hover(cx)).text_color(theme::text(cx)))
                 .cursor_pointer()
+                .child(Icon::new(IconName::FileText).small())
                 .child(name)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if this.path.as_ref() != Some(&path) && this.confirm_discard() {
@@ -760,103 +811,376 @@ impl Editor {
                     cx.notify();
                 }))
         });
+        let new_script = Button::new("script-add")
+            .ghost()
+            .xsmall()
+            .tab_stop(false)
+            .icon(IconName::Plus)
+            .tooltip("New script")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.new_script_dialog();
+                cx.notify();
+            }));
         let catalog = vs_graph::components::project().len();
-        let running = self.task_running();
-        section(&format!("Project · {}", project.name), cx)
-            .child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(project.root.display().to_string()))
+        group(format!("Project · {}", project.name), Some(new_script.into_any_element()), cx)
+            .child(
+                div()
+                    .pb_1()
+                    .text_size(px(11.0))
+                    .text_color(theme::dim(cx))
+                    .child(project.root.display().to_string()),
+            )
             .children(rows)
-            .child(small_button("script-add".into(), "+ New script", cx).mt_1().on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.new_script_dialog();
-                    cx.notify();
-                },
-            )))
             .child(
                 div()
                     .mt_2()
-                    .text_size(px(11.0))
-                    .text_color(theme::dim(cx))
-                    .child(format!("Catalog · {catalog} component(s) of the game, besides Bevy's common ones")),
-            )
-            .child(
-                div()
+                    .pt_2()
                     .flex()
+                    .items_center()
                     .gap_1()
+                    .border_t_1()
+                    .border_color(theme::border(cx))
                     .child(
-                        small_button("catalog-refresh".into(), "Refresh catalog", cx)
-                            .when(running, |b| b.opacity(0.5))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_catalog(cx);
-                                cx.notify();
-                            })),
+                        div()
+                            .flex_1()
+                            .text_size(px(11.0))
+                            .text_color(theme::dim(cx))
+                            .child(format!("Catalog · {catalog} component{}", if catalog == 1 { "" } else { "s" })),
                     )
-                    .child(small_button("catalog-edit".into(), "Edit catalog", cx).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.edit_catalog();
-                            cx.notify();
-                        },
-                    ))),
+                    .child(
+                        Button::new("catalog-refresh")
+                            .ghost()
+                            .xsmall()
+                            .tab_stop(false)
+                            .icon(IconName::RefreshCw)
+                            .tooltip("Refresh catalog: build the game to read its components")
+                            .disabled(self.task_running())
+                            .on_click(dispatch(actions::RefreshCatalog)),
+                    )
+                    .child(
+                        Button::new("catalog-edit")
+                            .ghost()
+                            .xsmall()
+                            .tab_stop(false)
+                            .icon(IconName::Settings)
+                            .tooltip("Edit catalog: choose which components the editor offers")
+                            .on_click(dispatch(actions::EditCatalog)),
+                    ),
             )
     }
 
-    fn output_section(&self, cx: &App) -> impl IntoElement {
+    fn variables_group(&self, cx: &mut Context<Self>) -> Div {
+        let editor = cx.entity().downgrade();
+        let rows = self.graph.variables.iter().enumerate().map(|(i, var)| {
+            let editing_name = self.editing.as_ref().filter(|e| e.target == EditTarget::VarName(i));
+            let editing_value = self.editing.as_ref().filter(|e| e.target == EditTarget::VarValue(i));
+            let ty = var.value.ty();
+            let type_label = match ty {
+                PinType::Number => "num",
+                PinType::Bool => "bool",
+                PinType::String => "text",
+                PinType::Vec3 => "vec3",
+                PinType::Quat => "rot",
+                PinType::Color => "color",
+                _ => "?",
+            };
+            let wide = matches!(ty, PinType::Vec3 | PinType::Quat | PinType::Color);
+            let editor = editor.clone();
+            // Get, Set and Delete live in a menu, so the row keeps its width for the name.
+            let more = Button::new(("var-more", i))
+                .ghost()
+                .xsmall()
+                .tab_stop(false)
+                .icon(IconName::Ellipsis)
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                    let run = |f: fn(&mut Editor, usize)| {
+                        let editor = editor.clone();
+                        move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                            editor
+                                .update(cx, |e, cx| {
+                                    f(e, i);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    };
+                    menu.item(PopupMenuItem::new("Add Get node").on_click(run(|e, i| e.add_variable_node(i, "var.get"))))
+                        .item(PopupMenuItem::new("Add Set node").on_click(run(|e, i| e.add_variable_node(i, "var.set"))))
+                        .item(PopupMenuItem::new("Change type").on_click(run(Editor::cycle_variable_type)))
+                        .separator()
+                        .item(PopupMenuItem::new("Delete").on_click(run(Editor::remove_variable)))
+                });
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    field(
+                        SharedString::from(format!("var-name-{i}")),
+                        editing_name.map_or(var.name.clone(), |e| format!("{}|", e.buffer)),
+                        editing_name.is_some(),
+                        cx,
+                    )
+                    .flex_1()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_edit(EditTarget::VarName(i));
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("var-type-{i}")))
+                        .w(px(38.0))
+                        .py_0p5()
+                        .flex()
+                        .justify_center()
+                        .rounded_sm()
+                        .text_size(px(11.0))
+                        .text_color(theme::pin(ty))
+                        .bg(Hsla::from(theme::pin(ty)).opacity(0.12))
+                        .cursor_pointer()
+                        .child(type_label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.cycle_variable_type(i);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    field(
+                        SharedString::from(format!("var-value-{i}")),
+                        editing_value.map_or(var.value.display(), |e| format!("{}|", e.buffer)),
+                        editing_value.is_some(),
+                        cx,
+                    )
+                    .w(px(if wide { 96.0 } else { 56.0 }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(Value::Bool(b)) = this.graph.variables.get(i).map(|v| v.value.clone()) {
+                            this.checkpoint();
+                            this.graph.variables[i].value = Value::Bool(!b);
+                        } else {
+                            this.start_edit(EditTarget::VarValue(i));
+                        }
+                        cx.notify();
+                    })),
+                )
+                .child(more)
+        });
+        let add = Button::new("var-add")
+            .ghost()
+            .xsmall()
+            .tab_stop(false)
+            .icon(IconName::Plus)
+            .tooltip("Add variable")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.add_variable();
+                cx.notify();
+            }));
+        group("Variables", Some(add.into_any_element()), cx)
+            .when(self.graph.variables.is_empty(), |d| {
+                d.child(div().text_color(theme::dim(cx)).child("No variables. A variable keeps a value between frames."))
+            })
+            .children(rows)
+    }
+
+    fn node_details(&self, cx: &mut Context<Self>) -> Div {
+        let hint = |text: String| div().px_3().py_3().text_color(theme::dim(cx)).child(text);
+        let id = match self.selected.iter().next() {
+            Some(id) if self.selected.len() == 1 => *id,
+            Some(_) => return hint(format!("{} nodes selected", self.selected.len())),
+            None => return hint("Select a node to see what it does.".into()),
+        };
+        let Some((node, def)) = self.graph.node(id).and_then(|n| library::find(&n.kind).map(|d| (n, d))) else {
+            return hint("Unknown node".into());
+        };
+        let pins = self.graph.pins_of(node);
+        let pin_row = |p: &vs_graph::library::PinDef| {
+            div()
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(theme::pin(p.ty)))
+                .child(div().flex_1().child(p.name.clone()))
+                .child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(p.ty.label()))
+        };
+        let editing = self.editing.as_ref().filter(|e| e.target == EditTarget::NodeName(id));
+        let name = match (editing, &node.name) {
+            (Some(e), _) => format!("{}|", e.buffer),
+            (None, Some(name)) => name.clone(),
+            (None, None) => "(unnamed)".into(),
+        };
+        let title = match node.var.as_ref().or(node.field.as_ref()) {
+            Some(subject) => format!("{} {subject}", def.title),
+            None => def.title.to_string(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_3()
+                    .py_3()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .border_b_1()
+                    .border_color(theme::border(cx))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().w(px(10.0)).h(px(10.0)).rounded_sm().bg(theme::category(def.category)))
+                            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child(title))
+                            .child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(format!("#{}", node.id))),
+                    )
+                    .child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(def.category))
+                    .child(div().text_color(theme::dim(cx)).child(def.description)),
+            )
+            .child(
+                group("Name", None, cx).child(field("node-name".into(), name, editing.is_some(), cx).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.start_edit(EditTarget::NodeName(id));
+                        cx.notify();
+                    }),
+                )),
+            )
+            .when(!pins.inputs.is_empty(), |d| {
+                d.child(group("Inputs", None, cx).children(pins.inputs.iter().map(pin_row)))
+            })
+            .when(!pins.outputs.is_empty(), |d| {
+                d.child(group("Outputs", None, cx).children(pins.outputs.iter().map(pin_row)))
+            })
+    }
+
+    /// The panel under the canvas: what the editor tells you back. The compiler's problems, the
+    /// output of the last preview or build, and the generated code.
+    fn bottom_panel(&self, compiled: &Compiled, cx: &mut Context<Self>) -> impl IntoElement {
+        const TABS: [BottomTab; 3] = [BottomTab::Problems, BottomTab::Output, BottomTab::Code];
+        let selected = TABS.iter().position(|t| *t == self.bottom_tab).unwrap_or(0);
+        let count = compiled.problems.len();
+        let output = match self.task.borrow().as_ref().map(|t| t.finished()) {
+            Some(None) => "Output · running",
+            _ => "Output",
+        };
+        let code_toggle = |id: &'static str, label: &'static str, view: CodeView| {
+            Button::new(id).ghost().xsmall().tab_stop(false).label(label).selected(self.code_view == view).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.code_view = view;
+                    cx.notify();
+                }),
+            )
+        };
+        let tabs = TabBar::new("bottom-tabs")
+            .underline()
+            .small()
+            .selected_index(selected)
+            .prefix(div().w(px(6.0)))
+            .child(Tab::new().label(if count == 0 { "Problems".to_string() } else { format!("Problems ({count})") }))
+            .child(Tab::new().label(output))
+            .child(Tab::new().label("Code"))
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                this.bottom_tab = TABS[*ix];
+                cx.notify();
+            }))
+            .suffix(
+                div()
+                    .h_full()
+                    .pr_1()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .when(self.bottom_tab == BottomTab::Code, |d| {
+                        d.child(code_toggle("view-lua", "Lua (preview)", CodeView::Lua))
+                            .child(code_toggle("view-rust", "Rust (build)", CodeView::Rust))
+                    })
+                    .child(icon_button("panel-hide", IconName::Close, "Hide panel", &actions::ToggleBottomPanel)),
+            );
+        let body = match self.bottom_tab {
+            BottomTab::Problems => self.problems_list(compiled, cx).into_any_element(),
+            BottomTab::Output => self.output_log(cx).into_any_element(),
+            BottomTab::Code => {
+                let code = match self.code_view {
+                    CodeView::Lua => compiled.lua.clone(),
+                    CodeView::Rust => self.rust_code(compiled),
+                };
+                code_block(&code, if self.code_view == CodeView::Lua { "--" } else { "//" }, cx).into_any_element()
+            }
+        };
+        div()
+            .h(px(240.0))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(theme::panel_bg(cx))
+            .border_t_1()
+            .border_color(theme::border(cx))
+            .child(tabs)
+            .child(div().id("bottom-body").flex_1().min_h_0().overflow_y_scroll().p_2().child(body))
+    }
+
+    fn problems_list(&self, compiled: &Compiled, cx: &mut Context<Self>) -> Div {
+        if compiled.problems.is_empty() {
+            return div().p_1().text_color(theme::dim(cx)).child("No problems. The graph compiles.");
+        }
+        div().flex().flex_col().children(compiled.problems.iter().enumerate().map(|(i, p)| {
+            let (icon, color) = if p.severity == Severity::Error {
+                (IconName::CircleX, theme::error(cx))
+            } else {
+                (IconName::TriangleAlert, theme::warning(cx))
+            };
+            let node = p.node;
+            div()
+                .id(("problem", i))
+                .px_2()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .hover(|s| s.bg(theme::button_hover(cx)))
+                .when(node.is_some(), |d| d.cursor_pointer())
+                .child(Icon::new(icon).small().text_color(color))
+                .child(div().flex_1().child(p.message.clone()))
+                .when_some(node, |d, id| d.child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(format!("#{id}"))))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(id) = node {
+                        this.focus_node(id);
+                    }
+                    cx.notify();
+                }))
+        }))
+    }
+
+    fn output_log(&self, cx: &App) -> Div {
         let task = self.task.borrow();
-        let task = task.as_ref().expect("checked by the caller");
+        let Some(task) = task.as_ref() else {
+            return div()
+                .p_1()
+                .text_color(theme::dim(cx))
+                .child("Nothing has run yet. Preview or build the game from the Project menu.");
+        };
         let state = match task.finished() {
             None => "running",
             Some(Outcome::Succeeded) => "done",
             Some(Outcome::Failed) => "failed",
             Some(Outcome::Stopped) => "stopped",
         };
-        section(&format!("Output · {} · {state}", task.label), cx).child(
-            div()
-                .p_2()
-                .rounded_md()
-                .bg(theme::field_bg(cx))
-                .font_family(MONO)
-                .text_size(px(11.0))
-                .children(task.tail(14).into_iter().map(|line| {
-                    let color = if line.trim_start().starts_with("error") {
-                        theme::error(cx)
-                    } else if line.trim_start().starts_with("warning") {
-                        theme::warning(cx)
-                    } else {
-                        theme::dim(cx)
-                    };
-                    div().text_color(color).child(if line.is_empty() { " ".to_string() } else { line })
-                })),
-        )
-    }
-
-    fn code_section(&self, compiled: &Compiled, cx: &mut Context<Self>) -> impl IntoElement {
-        let code = match self.code_view {
-            CodeView::Lua => compiled.lua.clone(),
-            CodeView::Rust => self.rust_code(compiled),
-        };
-        let tab = |id: &'static str, label: &'static str, view: CodeView| {
-            small_button(id.into(), label, cx)
-                .map(|b| {
-                    // Like shadcn's tabs: the active one is filled, the others recede.
-                    if self.code_view == view {
-                        b.bg(theme::highlight(cx)).text_color(theme::text(cx))
-                    } else {
-                        b.bg(gpui_kit::transparent_black()).text_color(theme::dim(cx))
-                    }
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.code_view = view;
-                    cx.notify();
-                }))
-        };
-        section("Generated code", cx)
-            .child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .child(tab("view-lua", "Lua (preview)", CodeView::Lua))
-                    .child(tab("view-rust", "Rust (build)", CodeView::Rust)),
-            )
-            .child(code_block(&code, if self.code_view == CodeView::Lua { "--" } else { "//" }, cx))
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(format!("{} · {state}", task.label)))
+            .child(div().font_family(MONO).text_size(px(11.5)).children(task.tail(12).into_iter().map(|line| {
+                let color = if line.trim_start().starts_with("error") {
+                    theme::error(cx)
+                } else if line.trim_start().starts_with("warning") {
+                    theme::warning(cx)
+                } else {
+                    theme::dim(cx)
+                };
+                div().text_color(color).child(if line.is_empty() { " ".to_string() } else { line })
+            })))
     }
 
     /// The file `Build` writes for this script.
@@ -977,190 +1301,6 @@ impl Editor {
             )
     }
 
-    fn selection_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let body: Div = match self.selected.iter().next() {
-            Some(id) if self.selected.len() == 1 => {
-                let node = self.graph.node(*id);
-                match node.and_then(|n| library::find(&n.kind).map(|d| (n, d))) {
-                    Some((node, def)) => {
-                        let pins = self.graph.pins_of(node);
-                        let pin_rows = pins
-                            .inputs
-                            .iter()
-                            .map(|p| ("in", p))
-                            .chain(pins.outputs.iter().map(|p| ("out", p)))
-                            .map(|(dir, p)| {
-                                div()
-                                    .flex()
-                                    .gap_2()
-                                    .text_size(px(12.0))
-                                    .child(div().w(px(28.0)).text_color(theme::dim(cx)).child(dir))
-                                    .child(div().w(px(10.0)).h(px(10.0)).mt(px(3.0)).rounded_full().bg(theme::pin(p.ty)))
-                                    .child(p.name.clone())
-                                    .child(div().text_color(theme::dim(cx)).child(p.ty.label()))
-                            });
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(match node.var.as_ref().or(node.field.as_ref()) {
-                                        Some(subject) => format!("{} {subject} [{}]", def.title, node.id),
-                                        None => format!("{} [{}]", def.title, node.id),
-                                    }),
-                            )
-                            .child(div().text_color(theme::dim(cx)).child(def.description))
-                            .child({
-                                let id = node.id;
-                                let editing = self.editing.as_ref().filter(|e| e.target == EditTarget::NodeName(id));
-                                let text = match (editing, &node.name) {
-                                    (Some(e), _) => format!("{}|", e.buffer),
-                                    (None, Some(name)) => name.clone(),
-                                    (None, None) => "(unnamed)".into(),
-                                };
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().w(px(40.0)).text_color(theme::dim(cx)).child("Name"))
-                                    .child(field("node-name".into(), text, editing.is_some(), cx).flex_1().on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.start_edit(EditTarget::NodeName(id));
-                                            cx.notify();
-                                        }),
-                                    ))
-                            })
-                            .child(div().h(px(4.0)))
-                            .children(pin_rows)
-                    }
-                    None => div().text_color(theme::dim(cx)).child("Unknown node"),
-                }
-            }
-            Some(_) => div().text_color(theme::dim(cx)).child(format!("{} nodes selected", self.selected.len())),
-            None => div().text_color(theme::dim(cx)).child("Select a node to see what it does."),
-        };
-        section("Node", cx).child(body)
-    }
-
-    fn variables_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.graph.variables.iter().enumerate().map(|(i, var)| {
-            let editing_name = self.editing.as_ref().filter(|e| e.target == EditTarget::VarName(i));
-            let editing_value = self.editing.as_ref().filter(|e| e.target == EditTarget::VarValue(i));
-            let ty = var.value.ty();
-            let type_label = match ty {
-                PinType::Number => "num",
-                PinType::Bool => "bool",
-                PinType::String => "text",
-                PinType::Vec3 => "vec3",
-                PinType::Quat => "rot",
-                PinType::Color => "color",
-                _ => "?",
-            };
-            let wide = matches!(ty, PinType::Vec3 | PinType::Quat | PinType::Color);
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    field(
-                        SharedString::from(format!("var-name-{i}")),
-                        editing_name.map_or(var.name.clone(), |e| format!("{}|", e.buffer)),
-                        editing_name.is_some(),
-                        cx,
-                    )
-                    .flex_1()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.start_edit(EditTarget::VarName(i));
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("var-type-{i}")))
-                        .w(px(40.0))
-                        .px_1()
-                        .rounded_sm()
-                        .text_size(px(11.0))
-                        .text_color(theme::pin(ty))
-                        .border_1()
-                        .border_color(theme::border(cx))
-                        .cursor_pointer()
-                        .child(type_label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.cycle_variable_type(i);
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    field(
-                        SharedString::from(format!("var-value-{i}")),
-                        editing_value.map_or(var.value.display(), |e| format!("{}|", e.buffer)),
-                        editing_value.is_some(),
-                        cx,
-                    )
-                    .w(px(if wide { 104.0 } else { 64.0 }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(Value::Bool(b)) = this.graph.variables.get(i).map(|v| v.value.clone()) {
-                            this.checkpoint();
-                            this.graph.variables[i].value = Value::Bool(!b);
-                        } else {
-                            this.start_edit(EditTarget::VarValue(i));
-                        }
-                        cx.notify();
-                    })),
-                )
-                .child(small_button(format!("var-get-{i}"), "Get", cx).on_click(cx.listener(move |this, _, _, cx| {
-                    this.add_variable_node(i, "var.get");
-                    cx.notify();
-                })))
-                .child(small_button(format!("var-set-{i}"), "Set", cx).on_click(cx.listener(move |this, _, _, cx| {
-                    this.add_variable_node(i, "var.set");
-                    cx.notify();
-                })))
-                .child(small_button(format!("var-del-{i}"), "×", cx).on_click(cx.listener(move |this, _, _, cx| {
-                    this.remove_variable(i);
-                    cx.notify();
-                })))
-        });
-        section("Variables", cx).children(rows).child(
-            small_button("var-add".into(), "+ Add variable", cx)
-                .mt_1()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.add_variable();
-                    cx.notify();
-                })),
-        )
-    }
-
-    fn problems_section(&self, compiled: &Compiled, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = compiled.problems.iter().enumerate().map(|(i, p)| {
-            let color = if p.severity == Severity::Error { theme::error(cx) } else { theme::warning(cx) };
-            let node = p.node;
-            div()
-                .id(("problem", i))
-                .flex()
-                .gap_2()
-                .px_1()
-                .rounded_sm()
-                .hover(|s| s.bg(theme::button_hover(cx)))
-                .cursor_pointer()
-                .child(div().w(px(8.0)).h(px(8.0)).mt(px(5.0)).rounded_full().bg(color))
-                .child(div().flex_1().child(p.message.clone()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(id) = node {
-                        this.focus_node(id);
-                    }
-                    cx.notify();
-                }))
-        });
-        section("Problems", cx)
-            .when(compiled.problems.is_empty(), |d| {
-                d.child(div().text_color(theme::dim(cx)).child("No problems."))
-            })
-            .children(rows)
-    }
 }
 
 fn code_block(code: &str, comment: &'static str, cx: &App) -> Div {
@@ -1180,21 +1320,67 @@ fn code_block(code: &str, comment: &'static str, cx: &App) -> Div {
         }))
 }
 
-fn section(title: &str, cx: &App) -> Div {
+/// A side panel: a scrolling column on the panel background.
+fn panel(id: &'static str, cx: &App) -> gpui_kit::Stateful<Div> {
     div()
-        .p_3()
+        .id(id)
+        .h_full()
+        .flex_none()
         .flex()
         .flex_col()
-        .gap_1p5()
+        .bg(theme::panel_bg(cx))
+        .border_color(theme::border(cx))
+        .overflow_y_scroll()
+}
+
+/// The name of a panel, in its header row.
+fn panel_title(title: &str, cx: &App) -> Div {
+    div()
+        .h(px(34.0))
+        .flex_none()
+        .px_3()
+        .flex()
+        .items_center()
+        .border_b_1()
+        .border_color(theme::border(cx))
+        .text_size(px(11.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::dim(cx))
+        .child(title.to_uppercase())
+}
+
+/// A titled group of rows inside a panel, with an optional action (such as an add button) at the
+/// right of its title.
+fn group(title: impl Into<SharedString>, action: Option<gpui_kit::AnyElement>, cx: &App) -> Div {
+    let title: SharedString = title.into();
+    div()
+        .px_3()
+        .py_2()
+        .flex()
+        .flex_col()
+        .gap_1()
         .border_b_1()
         .border_color(theme::border(cx))
         .child(
             div()
-                .text_size(px(11.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme::dim(cx))
-                .child(title.to_uppercase()),
+                .h(px(22.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::dim(cx))
+                        .child(title.to_uppercase()),
+                )
+                .children(action),
         )
+}
+
+/// A click handler that runs `action`, as its menu item or shortcut would.
+fn dispatch<A: gpui_kit::Action>(action: A) -> impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static {
+    move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx)
 }
 
 fn field(id: SharedString, text: String, active: bool, cx: &App) -> gpui_kit::Stateful<Div> {
@@ -1212,19 +1398,6 @@ fn field(id: SharedString, text: String, active: bool, cx: &App) -> gpui_kit::St
         .overflow_hidden()
         .cursor_text()
         .child(text)
-}
-
-fn small_button(id: String, label: &str, cx: &App) -> gpui_kit::Stateful<Div> {
-    div()
-        .id(SharedString::from(id))
-        .px_1p5()
-        .py_0p5()
-        .rounded_sm()
-        .bg(theme::button_bg(cx))
-        .hover(|s| s.bg(theme::button_hover(cx)))
-        .text_size(px(11.0))
-        .cursor_pointer()
-        .child(label.to_string())
 }
 
 fn pin_dot(center: V2, ty: PinType, connected: bool, z: f32, cx: &App) -> Div {

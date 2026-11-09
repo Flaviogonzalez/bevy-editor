@@ -73,7 +73,15 @@ pub enum Dialog {
     NewScript { buffer: String },
 }
 
-/// Which generated code the side panel shows.
+/// The tabs of the panel under the canvas.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BottomTab {
+    Problems,
+    Output,
+    Code,
+}
+
+/// Which generated code the Code tab shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CodeView {
     Lua,
@@ -92,7 +100,9 @@ pub struct Editor {
     /// Undo, redo and unsaved changes.
     pub history: History,
     pub focus: FocusHandle,
-    pub show_code: bool,
+    /// Whether the panel under the canvas shows, and which of its tabs.
+    pub show_bottom_panel: bool,
+    pub bottom_tab: BottomTab,
     pub status: String,
     /// Last pointer position, canvas-local.
     pub mouse: V2,
@@ -124,7 +134,8 @@ impl Editor {
             editing: None,
             history: History::default(),
             focus,
-            show_code: true,
+            show_bottom_panel: true,
+            bottom_tab: BottomTab::Code,
             status: String::new(),
             mouse: V2::default(),
             canvas: Rc::new(Cell::new((V2::default(), V2::new(800.0, 600.0)))),
@@ -725,7 +736,8 @@ impl Editor {
             editing: None,
             history: History::default(),
             focus: self.focus.clone(),
-            show_code: self.show_code,
+            show_bottom_panel: self.show_bottom_panel,
+            bottom_tab: self.bottom_tab,
             status: String::new(),
             mouse: self.mouse,
             canvas: self.canvas.clone(),

@@ -6,7 +6,7 @@ use std::time::Duration;
 use gpui_kit::{Context, Window};
 use vs_project::Project;
 
-use crate::editor::{Dialog, Editor};
+use crate::editor::{BottomTab, Dialog, Editor};
 use crate::tasks::{Outcome, Task, Then};
 
 impl Editor {
@@ -237,6 +237,9 @@ impl Editor {
         match task {
             Ok(task) => {
                 *self.task.borrow_mut() = Some(task);
+                // Show what the run prints.
+                self.show_bottom_panel = true;
+                self.bottom_tab = BottomTab::Output;
                 cx.spawn(async move |this, cx| {
                     loop {
                         cx.background_executor().timer(Duration::from_millis(250)).await;

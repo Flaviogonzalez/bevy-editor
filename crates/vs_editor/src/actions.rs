@@ -32,7 +32,7 @@ actions!(
         SelectAll,
         AddNode,
         FrameAll,
-        ToggleCode,
+        ToggleBottomPanel,
         Preview,
         Build,
         Stop,
@@ -64,6 +64,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(cmd!("a"), SelectAll, c),
         KeyBinding::new("tab", AddNode, c),
         KeyBinding::new("f", FrameAll, c),
+        KeyBinding::new(cmd!("j"), ToggleBottomPanel, c),
         KeyBinding::new("f5", Preview, c),
         KeyBinding::new(cmd!("b"), Build, c),
         KeyBinding::new("shift-f5", Stop, c),
@@ -109,7 +110,7 @@ pub fn register<E: InteractiveElement>(el: E, cx: &mut Context<Editor>) -> E {
     let el = on::<SelectAll, _>(el, cx, |e, _, _| e.selected = e.graph.nodes.iter().map(|n| n.id).collect());
     let el = on::<AddNode, _>(el, cx, |e, _, _| e.open_menu(e.mouse, None));
     let el = on::<FrameAll, _>(el, cx, |e, _, _| e.frame());
-    let el = on::<ToggleCode, _>(el, cx, |e, _, _| e.show_code = !e.show_code);
+    let el = on::<ToggleBottomPanel, _>(el, cx, |e, _, _| e.show_bottom_panel = !e.show_bottom_panel);
     // The project commands do nothing without a project, as their menu items are disabled then.
     let el = on::<Preview, _>(el, cx, |e, w, cx| {
         if e.project.is_some() {

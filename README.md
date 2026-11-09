@@ -207,7 +207,7 @@ Every command is in the menu bar (File, Edit, View, Project), which also shows i
 | New / open project, settings | File menu; a dialog takes the name, Enter confirms, Escape cancels |
 | Preview, build, stop | F5, Ctrl+B, Shift+F5, or the Project menu and the toolbar's run buttons |
 
-The side panel shows the project and its scripts, the output of the last preview or build, the selected node, the graph's variables (rename, change type, add Get / Set nodes), the problems the compiler found (click one to jump to its node), and the generated Lua or Rust.
+The Explorer on the left shows the open project, its scripts and its catalog of components, and the graph's variables (click a name or value to edit it, the type to change it, and ⋯ to add Get / Set nodes or delete it). The Inspector on the right shows the selected node: what it does, its name and its pins. The panel under the canvas (Ctrl+J) has three tabs: the problems the compiler found (click one to jump to its node), the output of the last preview or build, which it switches to when one starts, and the generated Lua or Rust.
 
 ## The Lua runtime contract
 
