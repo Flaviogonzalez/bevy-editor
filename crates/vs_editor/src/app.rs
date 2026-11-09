@@ -53,7 +53,14 @@ impl Render for Editor {
                         .child(
                             resizable_panel().child(
                                 v_resizable("center-panels")
-                                    .child(resizable_panel().child(self.canvas_area(&layouts, &compiled, cx)))
+                                    .child(resizable_panel().child(
+                                        div()
+                                            .size_full()
+                                            .flex()
+                                            .flex_col()
+                                            .child(self.tab_bar(cx))
+                                            .child(self.canvas_area(&layouts, &compiled, cx)),
+                                    ))
                                     .child(
                                         resizable_panel()
                                             .size(px(240.0))

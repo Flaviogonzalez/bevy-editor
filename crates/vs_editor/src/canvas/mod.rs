@@ -164,9 +164,7 @@ impl Editor {
                     window.focus(&this.focus, cx);
                     let additive = e.modifiers.shift || e.modifiers.control;
                     this.left_down(this.canvas.to_local(e.position), additive);
-                    if let Some(path) = this.canvas.open_request.take()
-                        && this.confirm_discard()
-                    {
+                    if let Some(path) = this.canvas.open_request.take() {
                         this.open_path(path, window);
                     }
                     cx.notify();

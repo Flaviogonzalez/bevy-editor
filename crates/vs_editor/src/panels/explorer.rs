@@ -311,9 +311,7 @@ impl Editor {
                 .child(Icon::new(IconName::FileText).small())
                 .child(name)
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.doc.path.as_ref() != Some(&path) && this.confirm_discard() {
-                        this.open_path(path.clone(), window);
-                    }
+                    this.open_path(path.clone(), window);
                     cx.notify();
                 }));
             rows.push(row.into_any_element());

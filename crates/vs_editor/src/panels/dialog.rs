@@ -192,7 +192,7 @@ impl Editor {
     pub fn confirm_dialog(&mut self, window: &mut Window) {
         match self.chrome.dialog.take() {
             Some(Dialog::NewProject { buffer }) => {
-                if !self.confirm_discard() {
+                if !self.confirm_discard_all() {
                     return;
                 }
                 match vs_project::create(&self.workspace.config.projects_dir, &buffer) {
@@ -208,9 +208,6 @@ impl Editor {
             }
             Some(Dialog::NewScript { buffer, folder }) => {
                 let Some(project) = self.workspace.project.clone() else { return };
-                if !self.confirm_discard() {
-                    return;
-                }
                 match project.new_script(&folder, &buffer) {
                     Ok(path) => {
                         self.open_path(path, window);

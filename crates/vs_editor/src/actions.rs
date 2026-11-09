@@ -22,6 +22,8 @@ actions!(
         OpenScript,
         Save,
         SaveAs,
+        CloseTab,
+        NextTab,
         NewProject,
         OpenProject,
         Settings,
@@ -56,6 +58,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(cmd!("o"), OpenScript, c),
         KeyBinding::new(cmd!("s"), Save, c),
         KeyBinding::new(cmd!("shift-s"), SaveAs, c),
+        KeyBinding::new(cmd!("w"), CloseTab, c),
+        KeyBinding::new("ctrl-tab", NextTab, c),
         KeyBinding::new(cmd!("z"), Undo, c),
         KeyBinding::new(cmd!("shift-z"), Redo, c),
         KeyBinding::new(cmd!("y"), Redo, c),
@@ -100,6 +104,8 @@ pub fn register<E: InteractiveElement>(el: E, cx: &mut Context<Editor>) -> E {
     let el = on::<OpenScript, _>(el, cx, |e, w, _| e.open(w));
     let el = on::<Save, _>(el, cx, |e, w, _| e.save(w));
     let el = on::<SaveAs, _>(el, cx, |e, w, _| e.save_as(w));
+    let el = on::<CloseTab, _>(el, cx, |e, w, _| e.close_tab(e.tabs.active(), w));
+    let el = on::<NextTab, _>(el, cx, |e, w, _| e.switch_tab((e.tabs.active() + 1) % e.tabs.len(), w));
     let el = on::<NewProject, _>(el, cx, |e, _, _| e.new_project_dialog());
     let el = on::<OpenProject, _>(el, cx, |e, w, _| e.open_project(w));
     let el = on::<Settings, _>(el, cx, |e, _, _| e.open_settings());

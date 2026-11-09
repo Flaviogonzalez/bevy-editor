@@ -33,6 +33,7 @@ fn file_menu(menu: PopupMenu, _: MenuState) -> PopupMenu {
         .separator()
         .menu("Save", Box::new(actions::Save))
         .menu("Save as…", Box::new(actions::SaveAs))
+        .menu("Close tab", Box::new(actions::CloseTab))
         .separator()
         .menu("New project…", Box::new(actions::NewProject))
         .menu("Open project…", Box::new(actions::OpenProject))

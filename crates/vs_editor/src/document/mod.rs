@@ -1,6 +1,6 @@
 //! The open script: its graph, the file it lives in, its undo history, which nodes are selected
-//! and where the canvas camera looks at it. Everything here belongs to one file, so when the
-//! editor holds several files later, each gets its own `Document`.
+//! and where the canvas camera looks at it. Everything here belongs to one file, and each open
+//! file has its own `Document` (see `tabs`).
 //!
 //! The operations here only touch the document, never the window or the panels, so they can be
 //! tested without GPUI. Whatever also needs the rest of the editor (a text edit, the status
@@ -10,6 +10,7 @@
 
 pub mod components;
 pub mod history;
+pub mod tabs;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -64,6 +65,12 @@ impl Document {
         self.path = Some(path.to_path_buf());
         self.history.mark_saved();
         Ok(())
+    }
+
+    /// Whether this is an untitled, untouched graph, which opening a file may replace instead of
+    /// keeping it in a tab of its own.
+    pub fn is_blank(&self) -> bool {
+        self.path.is_none() && !self.history.is_dirty() && self.graph.nodes.is_empty() && self.graph.variables.is_empty()
     }
 
     pub fn file_name(&self) -> String {

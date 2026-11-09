@@ -16,7 +16,7 @@ use crate::workspace::tasks::{Outcome, Task, Then};
 impl Editor {
     /// Picks a project folder, starting in the projects folder.
     pub fn open_project(&mut self, window: &mut Window) {
-        if !self.confirm_discard() {
+        if !self.confirm_discard_all() {
             return;
         }
         let mut picker = rfd::FileDialog::new().set_title("Open project");
@@ -115,8 +115,11 @@ impl Editor {
             .collect()
     }
 
-    /// Makes `project` current and opens its first script.
+    /// Makes `project` current and opens its first script. Every tab closes, without asking: the
+    /// callers asked already.
     pub fn enter_project(&mut self, project: Project, window: &mut Window) {
+        self.tabs.close_others();
+        self.reset(crate::document::Document::default());
         let first = project.scripts().into_iter().next();
         let catalog = self.set_project(project);
         match first {
@@ -131,8 +134,15 @@ impl Editor {
         }
     }
 
-    /// Saves the open script before a run, so the game sees what's on screen.
+    /// Saves the open scripts before a run, so the game sees what's on screen, in every tab.
     fn save_for_run(&mut self, window: &mut Window) -> bool {
+        for doc in self.tabs.others_mut().filter(|d| d.history.is_dirty()) {
+            let Some(path) = doc.path.clone() else { continue };
+            if let Err(e) = doc.write_to(&path) {
+                self.chrome.status = format!("Couldn't save {}: {e}", path.display());
+                return false;
+            }
+        }
         if !self.doc.history.is_dirty() {
             return true;
         }

@@ -11,6 +11,7 @@ use vs_graph::{NodeId, Value};
 
 use crate::canvas::{CanvasState, Drag};
 use crate::document::Document;
+use crate::document::tabs::Tabs;
 use crate::panels::Chrome;
 use crate::workspace::Workspace;
 use crate::canvas::layout::Hit;
@@ -38,12 +39,14 @@ pub struct Editing {
 /// The editor window's state, split by who owns it. Every panel and the canvas still render
 /// from `&Editor`, but each part changes for its own reasons:
 ///
-/// - `doc`: the open script and its undo history; later there will be one per open file.
+/// - `doc`: the script being edited and its undo history. `tabs` holds the other open ones.
 /// - `canvas`: the pointer's interaction with the canvas (drags, the add-node menu, hover).
 /// - `chrome`: the panels' own state (bottom tab, dialog, status line).
 /// - `workspace`: the project, the settings and the cargo run, which outlive the open script.
 pub struct Editor {
     pub doc: Document,
+    /// The other open scripts, one per tab; `doc` is the active tab's.
+    pub tabs: Tabs,
     pub canvas: CanvasState,
     pub chrome: Chrome,
     pub workspace: Workspace,
@@ -59,6 +62,7 @@ impl Editor {
         window.focus(&focus, cx);
         Self {
             doc: Document::default(),
+            tabs: Tabs::default(),
             canvas: CanvasState::default(),
             chrome: Chrome::default(),
             workspace: Workspace::default(),
@@ -201,24 +205,70 @@ impl Editor {
 
     // Files ------------------------------------------------------------------------------------
 
-    pub fn confirm_discard(&self) -> bool {
-        !self.doc.history.is_dirty()
+    /// Whether the unsaved changes of these documents may be thrown away: yes if none has any,
+    /// else whatever the user answers.
+    fn confirm_discard_of<'a>(docs: impl Iterator<Item = &'a Document>) -> bool {
+        let dirty: Vec<String> = docs.filter(|d| d.history.is_dirty()).map(|d| d.file_name()).collect();
+        dirty.is_empty()
             || rfd::MessageDialog::new()
                 .set_title("Unsaved changes")
-                .set_description("The current graph has unsaved changes. Discard them?")
+                .set_description(format!("{} {} unsaved changes. Discard them?", dirty.join(", "), if dirty.len() == 1 { "has" } else { "have" }))
                 .set_buttons(rfd::MessageButtons::YesNo)
                 .show()
                 == rfd::MessageDialogResult::Yes
     }
 
+    /// Before closing every tab (changing project): asks about unsaved changes in any of them.
+    pub fn confirm_discard_all(&self) -> bool {
+        Self::confirm_discard_of(self.tabs.all(&self.doc))
+    }
+
+    /// A new untitled graph, in a tab of its own.
     pub fn new_graph(&mut self, window: &mut Window) {
-        if !self.confirm_discard() {
-            return;
+        self.open_doc(Document::default(), window);
+    }
+
+    /// Edits `doc` in a new tab after the active one, or in the active tab when that holds only a
+    /// blank graph.
+    fn open_doc(&mut self, doc: Document, window: &mut Window) {
+        self.commit_edit();
+        if !self.doc.is_blank() {
+            self.tabs.open(std::mem::take(&mut self.doc));
         }
-        self.reset(Document::default());
-        // The script that was open is one of the others now.
+        self.show(doc, window);
+    }
+
+    /// Puts `doc` on the canvas (see [`Self::reset`]). The script that was there is one of the
+    /// others now, for the ambiguity warnings.
+    fn show(&mut self, doc: Document, window: &mut Window) {
+        self.reset(doc);
         self.scan_systems();
         self.update_title(window);
+    }
+
+    /// Makes tab `i` the one being edited.
+    pub fn switch_tab(&mut self, i: usize, window: &mut Window) {
+        if i == self.tabs.active() {
+            return;
+        }
+        self.commit_edit();
+        let next = self.tabs.switch(std::mem::take(&mut self.doc), i);
+        self.show(next, window);
+    }
+
+    /// Closes tab `i`, asking first if its script has unsaved changes. Closing the last tab
+    /// leaves a blank graph.
+    pub fn close_tab(&mut self, i: usize, window: &mut Window) {
+        let Some(doc) = self.tabs.get(&self.doc, i) else { return };
+        if !Self::confirm_discard_of(std::iter::once(doc)) {
+            return;
+        }
+        if i == self.tabs.active() {
+            let next = self.tabs.close_active().unwrap_or_default();
+            self.show(next, window);
+        } else {
+            self.tabs.close(i);
+        }
     }
 
     /// Replaces the open document with `doc` and clears everything that pointed into the old
@@ -235,9 +285,6 @@ impl Editor {
     }
 
     pub fn open(&mut self, window: &mut Window) {
-        if !self.confirm_discard() {
-            return;
-        }
         let mut dialog = rfd::FileDialog::new().add_filter("Visual script", &["lua"]).set_title("Open visual script");
         if let Some(project) = &self.workspace.project {
             dialog = dialog.set_directory(project.scripts_dir());
@@ -247,13 +294,27 @@ impl Editor {
         }
     }
 
-    /// Opens a script without asking about unsaved changes. The project it belongs to, if any,
-    /// becomes the current project.
+    /// Opens a script in a tab, or switches to its tab if it's open. The project it belongs to, if
+    /// any, becomes the current project; a script of another project closes every tab first
+    /// (asking about unsaved changes), since the catalog of components is one project's.
     pub fn open_path(&mut self, path: PathBuf, window: &mut Window) {
+        if let Some(i) = self.tabs.find(&self.doc, &path) {
+            self.switch_tab(i, window);
+            return;
+        }
         match Document::load(&path) {
             Ok(doc) => {
                 let project = vs_project::Project::containing(&path).or_else(|| self.workspace.project.clone());
-                self.reset(doc);
+                let root = |p: Option<&vs_project::Project>| p.map(|p| p.root.clone());
+                if root(project.as_ref()) == root(self.workspace.project.as_ref()) {
+                    self.open_doc(doc, window);
+                } else {
+                    if !self.confirm_discard_all() {
+                        return;
+                    }
+                    self.tabs.close_others();
+                    self.reset(doc);
+                }
                 // Always reload, even for the same project: a preview may have rewritten its catalog.
                 let catalog = match project {
                     Some(project) => self.set_project(project),
