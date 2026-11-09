@@ -9,6 +9,7 @@ use gpui_kit::{
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{Disableable, Selectable, Sizable};
 use gpui_kit::component::empty::{
@@ -65,22 +66,42 @@ impl Render for Editor {
             }))
             .relative()
             .child(self.toolbar(&compiled, cx))
+            // The panels around the canvas can be resized by dragging the lines between them.
+            // gpui-component keeps their sizes in window state keyed by each group's id, so they
+            // survive re-renders. The side panels are `fixed`: resizing the window grows or
+            // shrinks the canvas, not them.
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(self.explorer(cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(self.canvas_area(&layouts, &compiled, cx))
-                            .when(self.show_bottom_panel, |d| d.child(self.bottom_panel(&compiled, cx))),
-                    )
-                    .child(self.inspector(cx)),
+                div().flex_1().min_h_0().child(
+                    h_resizable("main-panels")
+                        .child(
+                            resizable_panel()
+                                .size(px(272.0))
+                                .size_range(px(200.0)..px(480.0))
+                                .fixed()
+                                .child(self.explorer(cx)),
+                        )
+                        .child(
+                            resizable_panel().child(
+                                v_resizable("center-panels")
+                                    .child(resizable_panel().child(self.canvas_area(&layouts, &compiled, cx)))
+                                    .child(
+                                        resizable_panel()
+                                            .size(px(240.0))
+                                            .size_range(px(120.0)..px(600.0))
+                                            .fixed()
+                                            .visible(self.show_bottom_panel)
+                                            .child(self.bottom_panel(&compiled, cx)),
+                                    ),
+                            ),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size(px(300.0))
+                                .size_range(px(220.0)..px(520.0))
+                                .fixed()
+                                .child(self.inspector(cx)),
+                        ),
+                ),
             )
             .when(self.dialog.is_some(), |d| d.child(self.dialog_element(cx)))
             .child(
@@ -738,7 +759,6 @@ impl Editor {
     /// catalog of components), then the graph's variables.
     fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         panel("explorer", cx)
-            .w(px(272.0))
             .border_r_1()
             .child(panel_title("Explorer", cx))
             .child(self.project_group(cx))
@@ -748,7 +768,6 @@ impl Editor {
     /// The right panel: what you edit. The selected node, what it does, its name and its pins.
     fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         panel("inspector", cx)
-            .w(px(300.0))
             .border_l_1()
             .child(panel_title("Inspector", cx))
             .child(self.node_details(cx))
@@ -1108,8 +1127,7 @@ impl Editor {
             }
         };
         div()
-            .h(px(240.0))
-            .flex_none()
+            .size_full()
             .flex()
             .flex_col()
             .bg(theme::panel_bg(cx))
@@ -1320,12 +1338,12 @@ fn code_block(code: &str, comment: &'static str, cx: &App) -> Div {
         }))
 }
 
-/// A side panel: a scrolling column on the panel background.
+/// A side panel: a scrolling column on the panel background, filling the resizable slot it
+/// sits in (the slot decides the width).
 fn panel(id: &'static str, cx: &App) -> gpui_kit::Stateful<Div> {
     div()
         .id(id)
-        .h_full()
-        .flex_none()
+        .size_full()
         .flex()
         .flex_col()
         .bg(theme::panel_bg(cx))
