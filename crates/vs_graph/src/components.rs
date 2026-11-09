@@ -6,13 +6,22 @@
 //! when it runs in preview, into [`PROJECT_FILE`]: its own components, plus any others its
 //! [`CONFIG_FILE`] asks for. [`load_project`] reads it.
 //!
+//! A third source needs no preview run: the components the project's scripts declare on their
+//! Define Component cards. [`load_project`] reads those too, from the script files, and a script
+//! always knows the ones it declares itself ([`field_in`]).
+//!
 //! A field is named `Component.path`, such as `PointLight.intensity` or `Sprite.color`.
 
+use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+use crate::graph::{ComponentDef, Graph};
 use crate::library::PinType;
+
+/// Where a game's scripts live, relative to its root.
+pub const SCRIPTS_DIR: &str = "assets/scripts";
 
 /// The bundled catalog of Bevy components.
 pub const BUNDLED: &str = include_str!("../bevy_components.json");
@@ -72,19 +81,22 @@ pub struct FieldInfo {
 struct Store {
     bundled: Vec<ComponentInfo>,
     project: Vec<ComponentInfo>,
+    declared: Vec<ComponentInfo>,
 }
 
 fn store() -> &'static RwLock<Store> {
     static STORE: OnceLock<RwLock<Store>> = OnceLock::new();
     STORE.get_or_init(|| {
         let bundled = serde_json::from_str(BUNDLED).expect("the bundled catalog parses");
-        RwLock::new(Store { bundled, project: Vec::new() })
+        RwLock::new(Store { bundled, project: Vec::new(), declared: Vec::new() })
     })
 }
 
-/// Every known component: the bundled ones, then the project's. A project entry for a bundled
-/// component (asked for to get deeper fields, say) takes its fields but keeps the bundled name for
-/// code, which is the prelude's (`PointLight`, not a guessed `bevy::light::PointLight`).
+/// Every known component: the bundled ones, the project's, then the ones its scripts declare.
+/// A project entry for a bundled component (asked for to get deeper fields, say) takes its fields
+/// but keeps the bundled name for code, which is the prelude's (`PointLight`, not a guessed
+/// `bevy::light::PointLight`). A declared component replaces a project entry of the same name:
+/// the preview lists it too, once it's reflected, but with a guessed path.
 pub fn all() -> Vec<ComponentInfo> {
     let store = store().read().unwrap();
     let mut out = store.bundled.clone();
@@ -94,7 +106,33 @@ pub fn all() -> Vec<ComponentInfo> {
             None => out.push(c.clone()),
         }
     }
+    for c in &store.declared {
+        match out.iter_mut().find(|known| known.name == c.name) {
+            Some(known) => *known = c.clone(),
+            None => out.push(c.clone()),
+        }
+    }
     out
+}
+
+/// Whether `name` is one of Bevy's bundled components.
+pub fn is_bundled(name: &str) -> bool {
+    store().read().unwrap().bundled.iter().any(|c| c.name == name)
+}
+
+/// A declared component as the catalog lists it. Generated code names it through the `pub use`
+/// beside the script modules, which every script module can reach as `super::`.
+pub fn declared_info(def: &ComponentDef) -> ComponentInfo {
+    ComponentInfo {
+        name: def.name.clone(),
+        rust_path: format!("super::{}", def.name),
+        fields: def.fields.iter().map(|f| FieldInfo { path: f.name.clone(), ty: f.value.ty() }).collect(),
+    }
+}
+
+/// Replaces the components the project's scripts declare.
+pub fn set_declared(components: Vec<ComponentInfo>) {
+    store().write().unwrap().declared = components;
 }
 
 pub fn find(name: &str) -> Option<ComponentInfo> {
@@ -111,17 +149,72 @@ pub fn set_project(components: Vec<ComponentInfo>) {
     store().write().unwrap().project = components;
 }
 
-/// Reads the catalog the game wrote into `root/.bevy-editor/components.json`, replacing the
-/// previous project's. None written yet means none. Returns how many components it lists.
-pub fn load_project(root: &std::path::Path) -> Result<usize, String> {
+/// Reads the catalog the game wrote into `root/.bevy-editor/components.json`, and the components
+/// the scripts in `root/assets/scripts` declare, replacing the previous project's. None written
+/// yet means none. Returns how many components the two list.
+///
+/// A game's `build.rs` calls this before compiling any script, so a script can use a component
+/// another one declares. Two components that would get the same type name are an error.
+pub fn load_project(root: &Path) -> Result<usize, String> {
     let path = root.join(PROJECT_FILE);
     let list: Vec<ComponentInfo> = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?,
         Err(_) => Vec::new(),
     };
-    let n = list.len();
+    let declared = scan_declared(&root.join(SCRIPTS_DIR))?;
+    let n = list.len() + declared.len();
     set_project(list);
+    set_declared(declared);
     Ok(n)
+}
+
+/// The components the scripts in `dir` declare. Files that don't parse are skipped: compiling
+/// them reports why.
+///
+/// Every generated component is re-exported beside the script modules, so each type name may
+/// appear once: a script's own component (`health.lua` → `Health`, unless it only declares) and
+/// each declared one.
+fn scan_declared(dir: &Path) -> Result<Vec<ComponentInfo>, String> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.retain(|p| p.extension().is_some_and(|e| e == "lua"));
+    files.sort();
+    let mut out = Vec::new();
+    // Each type name and what generates it, for the message on a clash.
+    let mut owners: Vec<(String, String)> = Vec::new();
+    let mut claim = |name: String, what: String| match owners.iter().find(|(n, _)| *n == name) {
+        Some((_, first)) => Err(format!("Two components are named `{name}`: {first}, and {what}. Rename one")),
+        None => {
+            owners.push((name, what));
+            Ok(())
+        }
+    };
+    for file in &files {
+        let Ok(source) = std::fs::read_to_string(file) else { continue };
+        let Ok(graph) = crate::load_from_str(source.trim_start_matches('\u{feff}')) else { continue };
+        let path = format!("scripts/{}", file.file_name().unwrap_or_default().to_string_lossy());
+        if !graph.declares_only() {
+            claim(crate::rust::names(&path).ty, format!("the component of {path}"))?;
+        }
+        for def in graph.defined_components() {
+            claim(def.name.clone(), format!("the one declared in {path}"))?;
+            out.push(declared_info(def));
+        }
+    }
+    Ok(out)
+}
+
+/// The component and field info for `Component.path` as `graph` sees it: the components it
+/// declares itself first, since those may not be saved yet, then the catalog.
+pub fn field_in(graph: &Graph, field: &str) -> Option<(ComponentInfo, FieldInfo)> {
+    let (name, path) = split(field)?;
+    let component = match graph.defined_components().find(|d| d.name == name) {
+        Some(def) => declared_info(def),
+        None => find(name)?,
+    };
+    let info = component.fields.iter().find(|f| f.path == path)?.clone();
+    Some((component, info))
 }
 
 /// `PointLight.intensity` → (`PointLight`, `intensity`).
@@ -135,6 +228,60 @@ pub fn field(field: &str) -> Option<(ComponentInfo, FieldInfo)> {
     let component = find(name)?;
     let info = component.fields.iter().find(|f| f.path == path)?.clone();
     Some((component, info))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Value, Variable};
+
+    /// A fresh `assets/scripts`-like folder with the given scripts.
+    fn scripts(name: &str, files: &[(&str, Graph)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vs_graph_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (file, graph) in files {
+            std::fs::write(dir.join(file), crate::save_to_string(graph)).unwrap();
+        }
+        dir
+    }
+
+    fn declaring(name: &str) -> Graph {
+        let mut g = Graph::default();
+        let fields = vec![Variable { name: "value".into(), value: Value::Number(1.0) }];
+        g.add_component_def(ComponentDef { name: name.into(), fields }, 0.0, 0.0);
+        g
+    }
+
+    #[test]
+    fn scripts_declare_components_for_the_whole_project() {
+        // `health.lua` only declares, so declaring `Health` doesn't clash with its own name.
+        let dir = scripts("declare", &[("health.lua", declaring("Health")), ("spinner.lua", crate::starter())]);
+        let found = scan_declared(&dir).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].rust_path, "super::Health");
+        assert_eq!(found[0].fields, vec![FieldInfo { path: "value".into(), ty: PinType::Number }]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn two_components_with_one_name_are_an_error() {
+        // `spinner.lua` has logic, so it has its own `Spinner` component.
+        let dir = scripts("clash", &[("a.lua", declaring("Spinner")), ("spinner.lua", crate::starter())]);
+        let err = scan_declared(&dir).unwrap_err();
+        assert!(err.contains("Two components are named `Spinner`"), "{err}");
+        assert!(err.contains("scripts/a.lua") && err.contains("scripts/spinner.lua"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_script_sees_the_components_it_declares() {
+        let g = declaring("Unsaved");
+        let (component, field) = field_in(&g, "Unsaved.value").unwrap();
+        assert_eq!((component.name.as_str(), field.ty), ("Unsaved", PinType::Number));
+        assert!(field_in(&Graph::default(), "Unsaved.value").is_none());
+        assert!(field_in(&Graph::default(), "Transform.translation").is_some());
+    }
 }
 
 /// [`load_project`] by its old name: projects created before it was renamed call this from their

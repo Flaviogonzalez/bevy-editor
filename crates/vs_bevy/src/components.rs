@@ -2,11 +2,19 @@
 //! editor's catalog of components is described from the type registry.
 
 use std::any::TypeId;
+use std::collections::HashMap;
 
 use bevy::ecs::reflect::ReflectComponent;
 use bevy::prelude::*;
 use bevy::reflect::{GetPath, PartialReflect, TypeInfo, TypeRegistration, TypeRegistry};
 use serde::Serialize;
+
+/// The components the project's scripts declare, by the name scripts use, as the generated
+/// preview code registered them ([`crate::preview::declare`]). Looked up before the registry's
+/// short names, which are ambiguous once two reflected types share one: with Bevy's automatic
+/// registration, a declared `Stats` would otherwise clash with any crate's `Stats`.
+#[derive(Resource, Default, Clone, Debug)]
+pub struct Declared(pub HashMap<String, TypeId>);
 use vs_nodes::{Arg, PinKind};
 
 /// A field's value as a node value, if its type is one pins carry.
@@ -53,16 +61,25 @@ pub fn write(target: &mut dyn PartialReflect, value: Arg) -> bool {
     }
 }
 
-/// The component registered under a short name, such as `PointLight`.
-fn registration<'a>(registry: &'a TypeRegistry, name: &str) -> Result<(&'a TypeRegistration, &'a ReflectComponent), String> {
-    let reg = registry.get_with_short_type_path(name).ok_or_else(|| format!("no component named {name}"))?;
+/// The component scripts call `name`: a declared one, or the one registered under that short
+/// name, such as `PointLight`.
+fn registration<'a>(
+    registry: &'a TypeRegistry,
+    declared: &Declared,
+    name: &str,
+) -> Result<(&'a TypeRegistration, &'a ReflectComponent), String> {
+    let reg = match declared.0.get(name) {
+        Some(id) => registry.get(*id),
+        None => registry.get_with_short_type_path(name),
+    };
+    let reg = reg.ok_or_else(|| format!("no component named {name}"))?;
     let component = reg.data::<ReflectComponent>().ok_or_else(|| format!("{name} isn't a component"))?;
     Ok((reg, component))
 }
 
 /// Reads `name.path` on an entity.
-pub fn get(world: &World, registry: &TypeRegistry, entity: Entity, name: &str, path: &str) -> Result<Arg, String> {
-    let (_, component) = registration(registry, name)?;
+pub fn get(world: &World, registry: &TypeRegistry, declared: &Declared, entity: Entity, name: &str, path: &str) -> Result<Arg, String> {
+    let (_, component) = registration(registry, declared, name)?;
     let entity_ref = world.get_entity(entity).map_err(|e| e.to_string())?;
     let value = component.reflect(entity_ref).ok_or_else(|| format!("the entity has no {name}"))?;
     let field = value.reflect_path(path).map_err(|e| format!("{name}.{path}: {e}"))?;
@@ -70,16 +87,24 @@ pub fn get(world: &World, registry: &TypeRegistry, entity: Entity, name: &str, p
 }
 
 /// The type of `name.path`, so a value coming from Lua can be converted to it.
-pub fn kind(registry: &TypeRegistry, name: &str, path: &str) -> Result<PinKind, String> {
-    let (reg, _) = registration(registry, name)?;
+pub fn kind(registry: &TypeRegistry, declared: &Declared, name: &str, path: &str) -> Result<PinKind, String> {
+    let (reg, _) = registration(registry, declared, name)?;
     let mut fields = Vec::new();
     walk(registry, reg.type_info(), String::new(), 0, MAX_LEVELS, &mut fields);
     fields.into_iter().find(|(p, _)| p == path).map(|(_, k)| k).ok_or_else(|| format!("{name} has no field {path}"))
 }
 
 /// Writes `name.path` on an entity.
-pub fn set(world: &mut World, registry: &TypeRegistry, entity: Entity, name: &str, path: &str, value: Arg) -> Result<(), String> {
-    let (_, component) = registration(registry, name)?;
+pub fn set(
+    world: &mut World,
+    registry: &TypeRegistry,
+    declared: &Declared,
+    entity: Entity,
+    name: &str,
+    path: &str,
+    value: Arg,
+) -> Result<(), String> {
+    let (_, component) = registration(registry, declared, name)?;
     let mut entity_mut = world.get_entity_mut(entity).map_err(|e| e.to_string())?;
     let mut target = component.reflect_mut(&mut entity_mut).ok_or_else(|| format!("the entity has no {name}"))?;
     let field = target.reflect_path_mut(path).map_err(|e| format!("{name}.{path}: {e}"))?;
@@ -207,19 +232,47 @@ mod tests {
         }
         let e = world.spawn((Label("hi".into()), Shadow::default())).id();
         let r = registry.read();
+        let none = Declared::default();
 
         let label = describe_named(&r, &["Label"]);
         assert_eq!(label[0].fields[0].path, "0");
-        assert_eq!(get(&world, &r, e, "Label", "0").unwrap(), Arg::Text("hi".into()));
-        set(&mut world, &r, e, "Label", "0", Arg::Text("bye".into())).unwrap();
+        assert_eq!(get(&world, &r, &none, e, "Label", "0").unwrap(), Arg::Text("hi".into()));
+        set(&mut world, &r, &none, e, "Label", "0", Arg::Text("bye".into())).unwrap();
         assert_eq!(world.get::<Label>(e).unwrap().0, "bye");
 
         let shadow = describe_named(&r, &["Shadow"]);
         let paths: Vec<&str> = shadow[0].fields.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["offset.x", "color"]);
-        set(&mut world, &r, e, "Shadow", "offset.x", Arg::Number(2.5)).unwrap();
-        assert_eq!(get(&world, &r, e, "Shadow", "offset.x").unwrap(), Arg::Number(2.5));
-        assert_eq!(kind(&r, "Shadow", "color").unwrap(), PinKind::Color);
-        assert!(set(&mut world, &r, e, "Shadow", "color", Arg::Number(1.0)).is_err());
+        set(&mut world, &r, &none, e, "Shadow", "offset.x", Arg::Number(2.5)).unwrap();
+        assert_eq!(get(&world, &r, &none, e, "Shadow", "offset.x").unwrap(), Arg::Number(2.5));
+        assert_eq!(kind(&r, &none, "Shadow", "color").unwrap(), PinKind::Color);
+        assert!(set(&mut world, &r, &none, e, "Shadow", "color", Arg::Number(1.0)).is_err());
+    }
+
+    mod other {
+        use bevy::prelude::*;
+
+        /// Another crate's type with the same short name as the test's `Label`.
+        #[derive(Component, Reflect, Default)]
+        #[reflect(Component, Default)]
+        pub struct Label(pub String);
+    }
+
+    /// Two reflected types named `Label` make the short name ambiguous; a declared name still
+    /// reaches the one the scripts declared.
+    #[test]
+    fn declared_names_win_over_ambiguous_short_names() {
+        let mut world = World::new();
+        let registry = AppTypeRegistry::default();
+        {
+            let mut r = registry.write();
+            r.register::<Label>();
+            r.register::<other::Label>();
+        }
+        let e = world.spawn((Label("mine".into()), other::Label("theirs".into()))).id();
+        let r = registry.read();
+        assert!(get(&world, &r, &Declared::default(), e, "Label", "0").is_err());
+        let declared = Declared(HashMap::from([("Label".to_string(), TypeId::of::<Label>())]));
+        assert_eq!(get(&world, &r, &declared, e, "Label", "0").unwrap(), Arg::Text("mine".into()));
     }
 }

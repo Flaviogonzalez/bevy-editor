@@ -22,6 +22,13 @@ pub fn register<C: Component>(app: &mut App, path: &'static str) {
     });
 }
 
+/// Registers `C`, a component a script declares, as the one scripts call `name`.
+pub fn declare<C: Component + bevy::reflect::GetTypeRegistration>(app: &mut App, name: &'static str) {
+    app.register_type::<C>();
+    let world = app.world_mut();
+    world.get_resource_or_init::<crate::components::Declared>().0.insert(name.to_string(), std::any::TypeId::of::<C>());
+}
+
 /// Writes the game's catalog of components (see [`crate::catalog`]) into
 /// `<root>/.bevy-editor/components.json` once the app has started, so the editor can offer Get /
 /// Set nodes for them. Generated preview code calls this.

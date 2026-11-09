@@ -18,7 +18,7 @@ pub mod rust;
 
 pub use lower::{Lowered, Problem, Severity, lower};
 pub use vs_nodes;
-pub use graph::{Graph, Link, Node, NodeId, PinRef, Side, Value, Variable};
+pub use graph::{ComponentDef, Graph, Link, Node, NodeId, PinRef, Side, Value, Variable};
 pub use library::{NodeDef, PinDef, PinType};
 
 const MARKER: &str = "bevy-visual-script";
@@ -147,6 +147,18 @@ mod tests {
     #[test]
     fn round_trips_through_a_file() {
         let g = spinner();
+        let file = save_to_string(&g);
+        assert_eq!(load_from_str(&file).unwrap(), g);
+    }
+
+    #[test]
+    fn round_trips_a_declared_component() {
+        let mut g = spinner();
+        let fields = vec![
+            Variable { name: "max".into(), value: Value::Number(100.0) },
+            Variable { name: "tint".into(), value: Value::Color { rgba: [1.0, 0.0, 0.0, 1.0] } },
+        ];
+        g.add_component_def(ComponentDef { name: "Health".into(), fields }, 0.0, 300.0);
         let file = save_to_string(&g);
         assert_eq!(load_from_str(&file).unwrap(), g);
     }

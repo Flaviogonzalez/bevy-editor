@@ -88,10 +88,11 @@ fn preview_matches_compiled_systems() {
     let components_source = include_str!("../assets/scripts/components.lua");
     let input_source = include_str!("../assets/scripts/input.lua");
     let despawn_source = include_str!("../assets/scripts/despawn.lua");
+    let charged_source = include_str!("../assets/scripts/charged.lua");
 
     for seed in 1..=SEEDS {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-        let starts: Vec<Transform> = (0..7)
+        let starts: Vec<Transform> = (0..8)
             .map(|_| Transform {
                 translation: Vec3::new(rng.float(-5.0, 5.0), rng.float(-5.0, 5.0), rng.float(-5.0, 5.0)),
                 rotation: Quat::from_euler(EulerRot::XYZ, rng.float(-3.0, 3.0), rng.float(-3.0, 3.0), 0.0),
@@ -110,6 +111,8 @@ fn preview_matches_compiled_systems() {
             rust.world_mut().spawn((starts[4], native::Components::default())).id(),
             rust.world_mut().spawn((starts[5], native::Input::default())).id(),
             rust.world_mut().spawn((starts[6], native::Despawn::default())).id(),
+            // Requires `Charge`, which it declares, and `Stats`, which `stats.lua` declares.
+            rust.world_mut().spawn((starts[7], native::Charged::default())).id(),
         ];
 
         // Preview: the generated components with Lua attached. The scripts are added as assets
@@ -125,6 +128,7 @@ fn preview_matches_compiled_systems() {
         let components = scripts.add(LuaScript { source: components_source.to_string() });
         let input = scripts.add(LuaScript { source: input_source.to_string() });
         let despawn = scripts.add(LuaScript { source: despawn_source.to_string() });
+        let charged = scripts.add(LuaScript { source: charged_source.to_string() });
         let lua_entities = vec![
             lua.world_mut().spawn((starts[0], preview::Demo::default(), VisualScript(demo))).id(),
             lua.world_mut().spawn((starts[1], preview::Logic::default(), VisualScript(logic))).id(),
@@ -133,6 +137,7 @@ fn preview_matches_compiled_systems() {
             lua.world_mut().spawn((starts[4], preview::Components::default(), VisualScript(components))).id(),
             lua.world_mut().spawn((starts[5], preview::Input::default(), VisualScript(input))).id(),
             lua.world_mut().spawn((starts[6], preview::Despawn::default(), VisualScript(despawn))).id(),
+            lua.world_mut().spawn((starts[7], preview::Charged::default(), VisualScript(charged))).id(),
         ];
 
         let mut held: Vec<KeyCode> = Vec::new();
@@ -158,16 +163,24 @@ fn preview_matches_compiled_systems() {
             // The game's component, which the script both requires and changes.
             let (r, l) = (rust.world().get::<Wobble>(rust_entities[4]), lua.world().get::<Wobble>(lua_entities[4]));
             assert_eq!(format!("{l:?}"), format!("{r:?}"), "seed {seed}, frame {frame}: Wobble differs");
+            // The components scripts declare, changed through reflection in the preview.
+            let (r, l) = (rust.world().get::<native::Stats>(rust_entities[7]), lua.world().get::<preview::Stats>(lua_entities[7]));
+            assert_eq!(format!("{l:?}"), format!("{r:?}"), "seed {seed}, frame {frame}: Stats differs");
+            let (r, l) = (rust.world().get::<native::Charge>(rust_entities[7]), lua.world().get::<preview::Charge>(lua_entities[7]));
+            assert_eq!(format!("{l:?}"), format!("{r:?}"), "seed {seed}, frame {frame}: Charge differs");
         }
         // The scripts really did something: otherwise matching would prove nothing.
         assert!(despawned_at.is_some(), "seed {seed}: the despawn script never despawned");
-        let moved: Vec<Transform> = transforms(&rust, &rust_entities).into_iter().take(6).map(Option::unwrap).collect();
+        let moved: Vec<Transform> = transforms(&rust, &rust_entities).into_iter().map(|t| t.unwrap_or_default()).collect();
         assert_ne!(bits(&moved[0]), bits(&starts[0]), "seed {seed}: the demo cube never moved");
         assert_ne!(bits(&moved[1]), bits(&starts[1]), "seed {seed}: the logic cube never moved");
         assert_ne!(bits(&moved[2]), bits(&starts[2]), "seed {seed}: the math cube never moved");
         assert_ne!(bits(&moved[3]), bits(&starts[3]), "seed {seed}: the coverage cube never moved");
         assert_ne!(bits(&moved[4]), bits(&starts[4]), "seed {seed}: the components cube never moved");
         assert_ne!(bits(&moved[5]), bits(&starts[5]), "seed {seed}: the input cube never moved");
+        assert_ne!(bits(&moved[7]), bits(&starts[7]), "seed {seed}: the charged cube never moved");
+        // Over 300 frames of 1-50 ms the charge passes 3 at least once, so `Stats` changes too.
+        assert!(rust.world().get::<native::Stats>(rust_entities[7]).is_some_and(|s| s.power > 1.5), "seed {seed}: Stats unchanged");
         assert!(rust.world().get::<Wobble>(rust_entities[4]).is_some_and(|w| w.amount != 0.0), "seed {seed}: Wobble unchanged");
     }
 }

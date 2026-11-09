@@ -141,6 +141,22 @@ pub struct Node {
     /// Flip Flop named `big` becomes a `big` field), and keeps a named value in its own `let`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The component a Define Component node declares. The node is its card on the canvas, so
+    /// moving, deleting, copying and undoing the card do the same to the definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<ComponentDef>,
+}
+
+/// A component declared in a script: data only, a name and typed fields with their starting
+/// values. Exported Rust gets a reflected struct, and every script in the project can Get and
+/// Set its fields.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComponentDef {
+    /// The type name, such as `Health`.
+    pub name: String,
+    /// Each field's name and starting value, which also gives its type.
+    #[serde(default)]
+    pub fields: Vec<Variable>,
 }
 
 /// One end of a link.
@@ -224,7 +240,7 @@ impl Graph {
         let id = self.next_id;
         self.next_id += 1;
         let mut node =
-            Node { id, kind: kind.to_string(), x, y, values: BTreeMap::new(), var, field: None, name: None };
+            Node { id, kind: kind.to_string(), x, y, values: BTreeMap::new(), var, field: None, name: None, component: None };
         let pins = self.pins_of(&node);
         for pin in pins.inputs {
             if let Some(value) = pin.default.clone().or_else(|| Value::default_for(pin.ty)) {
@@ -248,6 +264,7 @@ impl Graph {
             var: None,
             field: Some(field.to_string()),
             name: None,
+            component: None,
         };
         for pin in self.pins_of(&node).inputs {
             if let Some(value) = pin.default.clone().or_else(|| Value::default_for(pin.ty)) {
@@ -258,6 +275,27 @@ impl Graph {
         id
     }
 
+    /// Adds a Define Component node declaring `component`.
+    pub fn add_component_def(&mut self, component: ComponentDef, x: f32, y: f32) -> NodeId {
+        let id = self.add_node(library::DEFINE_COMPONENT, None, x, y);
+        self.node_mut(id).expect("just added").component = Some(component);
+        id
+    }
+
+    /// The components this script declares, in node order.
+    pub fn defined_components(&self) -> impl Iterator<Item = &ComponentDef> {
+        self.nodes.iter().filter_map(|n| n.component.as_ref())
+    }
+
+    /// Whether the script only declares components: it has some, and no variables or events. It
+    /// then gets no component of its own, so `health.lua` can declare `Health`.
+    /// [`crate::ir::Module::declares_only`] is the same rule on the IR.
+    pub fn declares_only(&self) -> bool {
+        self.variables.is_empty()
+            && self.defined_components().next().is_some()
+            && !self.nodes.iter().any(|n| library::find(&n.kind).is_some_and(|d| d.is_event()))
+    }
+
     pub fn pins_of(&self, node: &Node) -> Pins {
         let Some(def) = library::find(&node.kind) else {
             return Pins { inputs: Vec::new(), outputs: Vec::new() };
@@ -265,7 +303,7 @@ impl Graph {
         let mut pins = Pins { inputs: def.inputs.clone(), outputs: def.outputs.clone() };
         let resolved = match (&node.var, &node.field) {
             (Some(var), _) => Some(self.var_type(var)),
-            (None, Some(field)) => Some(crate::components::field(field).map_or(PinType::Any, |(_, f)| f.ty)),
+            (None, Some(field)) => Some(crate::components::field_in(self, field).map_or(PinType::Any, |(_, f)| f.ty)),
             (None, None) => None,
         };
         if let Some(ty) = resolved {

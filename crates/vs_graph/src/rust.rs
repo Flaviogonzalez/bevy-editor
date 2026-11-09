@@ -15,7 +15,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::visit_mut::VisitMut;
 
-use crate::ir::{Action, Device, EffectOp, Event, Intrinsic, Let, Lit, Module, Operand, Step};
+use crate::ir::{Action, Declared, Device, EffectOp, Event, Intrinsic, Let, Lit, Module, Operand, Step};
 use crate::library::PinType;
 use crate::lower::snake_case;
 
@@ -79,6 +79,20 @@ const KEYWORDS: &[&str] = &[
     "box", "do", "final", "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
 ];
 
+/// Whether a declared component may not be named `name`: Bevy's prelude has it, or the
+/// generated code does (`ScriptsPlugin`).
+pub(crate) fn is_reserved_type(name: &str) -> bool {
+    PRELUDE.contains(&name) || name == "ScriptsPlugin"
+}
+
+/// Whether `name` can be a declared component's field as written: a snake_case identifier that
+/// isn't a keyword. Fields keep their names in Rust, since the preview reaches them by name.
+pub(crate) fn is_field_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !KEYWORDS.contains(&name)
+}
+
 /// A snake-case identifier for any text.
 fn ident_name(text: &str) -> String {
     let mut name = snake_case(text);
@@ -133,10 +147,17 @@ pub fn emit_dev(scripts: &[Script], mode: Mode) -> String {
     let build = match mode {
         Mode::Native => plugin_body(scripts),
         Mode::Preview => {
+            // Each script's Lua runs on the entities with its component. The Lua reaches declared
+            // components through reflection, by the exact type registered here.
             let registrations = scripts.iter().map(|s| {
                 let names = names(&s.path);
                 let (m, ty, path) = (format_ident!("{}", names.module), format_ident!("{}", names.ty), &s.path);
-                quote! { ::vs_bevy::preview::register::<#m::#ty>(app, #path); }
+                let own = (!s.ir.declares_only()).then(|| quote! { ::vs_bevy::preview::register::<#m::#ty>(app, #path); });
+                let declared = s.ir.declares.iter().map(|d| {
+                    let (t, name) = (format_ident!("{}", d.name), &d.name);
+                    quote! { ::vs_bevy::preview::declare::<#m::#t>(app, #name); }
+                });
+                quote! { #own #(#declared)* }
             });
             quote! {
                 fn build(&self, app: &mut App) {
@@ -184,10 +205,16 @@ pub fn emit_export(scripts: &[Script]) -> Vec<(String, String)> {
 }
 
 fn reexports(scripts: &[Script]) -> TokenStream {
+    // Declared components are reached from other script modules as `super::Name`.
     let items = scripts.iter().map(|s| {
         let names = names(&s.path);
         let (m, ty) = (format_ident!("{}", names.module), format_ident!("{}", names.ty));
-        quote! { pub use #m::#ty; }
+        let own = (!s.ir.declares_only()).then(|| quote! { pub use #m::#ty; });
+        let declared = s.ir.declares.iter().map(|d| {
+            let t = format_ident!("{}", d.name);
+            quote! { pub use #m::#t; }
+        });
+        quote! { #own #(#declared)* }
     });
     quote! { #(#items)* }
 }
@@ -208,15 +235,31 @@ fn plugin_body(scripts: &[Script]) -> TokenStream {
     }
 }
 
-/// The component declaration and its `Default`. It requires the components the script uses, so
-/// an entity given it always has them, in the preview and in the game alike.
+/// The script's own component and its `Default`: its variables, then its state slots. It
+/// requires the components the script uses, so an entity given it always has them, in the
+/// preview and in the game alike.
 fn component(ir: &Module, ty: &syn::Ident, var_fields: &[String], state_fields: &[String]) -> TokenStream {
     let required: Vec<syn::Path> =
         ir.components.iter().map(|c| syn::parse_str(&c.rust_path).expect("component paths parse")).collect();
     let require = (!required.is_empty()).then(|| quote! { #[require(#(#required),*)] });
-    let decls = ir.variables.iter().zip(var_fields).map(|(v, f)| {
-        let f = format_ident!("{f}");
-        let t = match v.initial {
+    let vars = ir.variables.iter().zip(var_fields).map(|(v, f)| (format_ident!("{f}"), v.initial.clone()));
+    let states = state_fields.iter().map(|f| (format_ident!("{f}"), Lit::Bool(false)));
+    let fields: Vec<(syn::Ident, Lit)> = vars.chain(states).collect();
+    data_struct(ty, require, &fields, false)
+}
+
+/// A component a Define Component card declares. It's reflected, so the preview reaches its
+/// fields by name and the game's catalog and inspectors see it.
+fn declared(d: &Declared) -> TokenStream {
+    let ty = format_ident!("{}", d.name);
+    let fields: Vec<(syn::Ident, Lit)> = d.fields.iter().map(|f| (format_ident!("{}", f.name), f.initial.clone())).collect();
+    data_struct(&ty, None, &fields, true)
+}
+
+/// A component struct with the given fields, and a `Default` that starts each at its literal.
+fn data_struct(ty: &syn::Ident, require: Option<TokenStream>, fields: &[(syn::Ident, Lit)], reflect: bool) -> TokenStream {
+    let decls = fields.iter().map(|(f, lit)| {
+        let t = match lit {
             Lit::Number(_) => quote!(f32),
             Lit::Bool(_) => quote!(bool),
             Lit::Text(_) => quote!(String),
@@ -226,29 +269,30 @@ fn component(ir: &Module, ty: &syn::Ident, var_fields: &[String], state_fields: 
         };
         quote! { pub #f: #t, }
     });
-    let state_decls = state_fields.iter().map(|f| {
-        let f = format_ident!("{f}");
-        quote! { pub #f: bool, }
-    });
     // `Color::default()` is linear white, which no sRGB literal equals, so a color always gets
     // its own initializer.
-    let all_default = ir.variables.iter().all(|v| match &v.initial {
+    let all_default = fields.iter().all(|(_, lit)| match lit {
         Lit::Number(n) => n.to_bits() == 0,
         Lit::Bool(b) => !b,
         Lit::Text(s) => s.is_empty(),
         Lit::Vec3(v) | Lit::Quat(v) => v.iter().all(|n| n.to_bits() == 0),
         Lit::Color(_) => false,
     });
+    let (reflect_derive, reflect_attr) = if reflect {
+        (quote!(Reflect,), Some(quote! { #[reflect(Component, Default)] }))
+    } else {
+        (quote!(), None)
+    };
     if all_default {
         return quote! {
-            #[derive(Component, Clone, Debug, Default)]
+            #[derive(Component, #reflect_derive Clone, Debug, Default)]
+            #reflect_attr
             #require
-            pub struct #ty { #(#decls)* #(#state_decls)* }
+            pub struct #ty { #(#decls)* }
         };
     }
-    let inits = ir.variables.iter().zip(var_fields).map(|(v, f)| {
-        let f = format_ident!("{f}");
-        let value = match &v.initial {
+    let inits = fields.iter().map(|(f, lit)| {
+        let value = match lit {
             Lit::Text(s) => quote!(#s.to_string()),
             other => {
                 let e = lit_expr(other, false);
@@ -257,18 +301,15 @@ fn component(ir: &Module, ty: &syn::Ident, var_fields: &[String], state_fields: 
         };
         quote! { #f: #value, }
     });
-    let state_inits = state_fields.iter().map(|f| {
-        let f = format_ident!("{f}");
-        quote! { #f: false, }
-    });
     quote! {
-        #[derive(Component, Clone, Debug)]
+        #[derive(Component, #reflect_derive Clone, Debug)]
+        #reflect_attr
         #require
-        pub struct #ty { #(#decls)* #(#state_decls)* }
+        pub struct #ty { #(#decls)* }
 
         impl Default for #ty {
             fn default() -> Self {
-                Self { #(#inits)* #(#state_inits)* }
+                Self { #(#inits)* }
             }
         }
     }
@@ -282,7 +323,10 @@ fn script_items(script: &Script, names: &Names, systems: bool) -> TokenStream {
     let mut fields = Namer::default();
     let var_fields: Vec<String> = ir.variables.iter().map(|v| fields.take(&v.name)).collect();
     let state_fields: Vec<String> = ir.states.iter().map(|s| fields.take(s)).collect();
-    let component = component(ir, &ty, &var_fields, &state_fields);
+    // A script that only declares components has none of its own.
+    let own = (!ir.declares_only()).then(|| component(ir, &ty, &var_fields, &state_fields));
+    let declared: Vec<TokenStream> = ir.declares.iter().map(declared).collect();
+    let component = quote! { #own #(#declared)* };
     if !systems {
         return quote! {
             use bevy::prelude::*;
@@ -348,10 +392,24 @@ fn script_items(script: &Script, names: &Names, systems: bool) -> TokenStream {
         });
     }
     let plugin = format_ident!("{}", names.plugin);
-    let build = match schedule.len() {
-        0 => quote! { fn build(&self, _app: &mut App) {} },
-        1 => quote! { fn build(&self, app: &mut App) { app.add_systems(Update, #(#schedule)*); } },
-        _ => quote! { fn build(&self, app: &mut App) { app.add_systems(Update, (#(#schedule),*).chain()); } },
+    // Declared components are registered, so reflection (the catalog, inspectors) finds them.
+    let registrations: Vec<TokenStream> = ir
+        .declares
+        .iter()
+        .map(|d| {
+            let t = format_ident!("{}", d.name);
+            quote! { app.register_type::<#t>(); }
+        })
+        .collect();
+    let add_systems = match schedule.len() {
+        0 => None,
+        1 => Some(quote! { app.add_systems(Update, #(#schedule)*); }),
+        _ => Some(quote! { app.add_systems(Update, (#(#schedule),*).chain()); }),
+    };
+    let build = if registrations.is_empty() && add_systems.is_none() {
+        quote! { fn build(&self, _app: &mut App) {} }
+    } else {
+        quote! { fn build(&self, app: &mut App) { #(#registrations)* #add_systems } }
     };
     let condition_use = needs_condition.then(|| quote! { use bevy::input::common_conditions::input_just_pressed; });
     quote! {
@@ -974,6 +1032,76 @@ mod tests {
         assert_eq!(quote!(#e).to_string(), "(x + y) * 2.0");
         let s = inline("math.min", vec![lit_expr(&Lit::Number(2.0), false), syn::parse_quote!(x)]);
         assert!(quote!(#s).to_string().starts_with("2.0_f32 . min"), "{}", quote!(#s));
+    }
+
+    fn declare(g: &mut crate::Graph, name: &str, fields: &[(&str, crate::Value)]) {
+        let fields = fields.iter().map(|(n, v)| crate::Variable { name: n.to_string(), value: v.clone() }).collect();
+        g.add_component_def(crate::ComponentDef { name: name.into(), fields }, 0.0, 0.0);
+    }
+
+    #[test]
+    fn a_declaring_script_gets_a_reflected_registered_component_and_none_of_its_own() {
+        let mut g = crate::Graph::default();
+        declare(&mut g, "Health", &[("max", crate::Value::Number(100.0)), ("alive", crate::Value::Bool(true))]);
+        let lowered = crate::lower(&g);
+        assert!(lowered.problems.is_empty(), "{:?}", lowered.problems);
+        assert!(lowered.module.declares_only());
+        let script = || Script { path: "scripts/health.lua".into(), ir: &lowered.module };
+
+        let native = emit_dev(&[script()], Mode::Native);
+        assert!(native.contains("#[derive(Component, Reflect, Clone, Debug)]"), "{native}");
+        assert!(native.contains("#[reflect(Component, Default)]"), "{native}");
+        assert!(native.contains("max: 100.0"), "{native}");
+        assert!(native.contains("app.register_type::<Health>();"), "{native}");
+        assert!(native.contains("pub use health::Health;"), "{native}");
+        // Its own component would be `Health` too.
+        assert_eq!(native.matches("pub struct Health ").count(), 1, "{native}");
+
+        let preview = emit_dev(&[script()], Mode::Preview);
+        assert!(preview.contains("::vs_bevy::preview::declare::<health::Health>(app, \"Health\");"), "{preview}");
+        assert!(!preview.contains("preview::register"), "{preview}");
+    }
+
+    #[test]
+    fn a_script_requires_the_components_it_declares_and_uses() {
+        let mut g = crate::Graph::default();
+        declare(&mut g, "Charge", &[("level", crate::Value::Number(0.0))]);
+        let update = g.add_node("event.update", None, 0.0, 0.0);
+        let set = g.add_field_node("component.set", "Charge.level", 0.0, 0.0);
+        assert!(g.link(crate::PinRef::new(update, "then"), crate::PinRef::new(set, "in")));
+        let lowered = crate::lower(&g);
+        assert!(lowered.problems.is_empty(), "{:?}", lowered.problems);
+        assert!(!lowered.module.declares_only());
+        let native = emit_dev(&[Script { path: "scripts/battery.lua".into(), ir: &lowered.module }], Mode::Native);
+        assert!(native.contains("#[require(super::Charge)]"), "{native}");
+        assert!(native.contains("pub struct Battery"), "{native}");
+        assert!(native.contains("#[derive(Component, Reflect, Clone, Debug, Default)]"), "{native}");
+        assert!(native.contains("pub use battery::Battery;\npub use battery::Charge;"), "{native}");
+    }
+
+    #[test]
+    fn declarations_need_free_names_and_snake_case_fields() {
+        let errors = |name: &str, fields: &[&str]| {
+            let mut g = crate::Graph::default();
+            let fields: Vec<(&str, crate::Value)> = fields.iter().map(|f| (*f, crate::Value::Number(0.0))).collect();
+            declare(&mut g, name, &fields);
+            crate::lower(&g).problems.into_iter().map(|p| p.message).collect::<Vec<_>>()
+        };
+        assert!(errors("Health", &["max", "regen_rate", "_x2"]).is_empty());
+        assert!(errors("health", &[])[0].contains("isn't a component name"));
+        assert!(errors("Transform", &[])[0].contains("already a Bevy type"));
+        assert!(errors("PointLight", &[])[0].contains("already a Bevy type"));
+        assert!(errors("Health", &["Max"])[0].contains("snake_case"));
+        assert!(errors("Health", &["type"])[0].contains("snake_case"));
+        assert!(errors("Health", &["max", "max"])[0].contains("two fields named `max`"));
+
+        let mut g = crate::Graph::default();
+        declare(&mut g, "Health", &[]);
+        declare(&mut g, "Health", &[]);
+        let problems = crate::lower(&g).problems;
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("declared twice"));
+        assert_eq!(problems[0].node, Some(g.nodes[1].id));
     }
 }
 

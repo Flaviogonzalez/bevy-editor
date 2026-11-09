@@ -1,12 +1,13 @@
 //! Writes the differential test's scripts into `assets/scripts`: hand-built ones (`demo.lua`,
-//! `logic.lua`, `math.lua`, `components.lua`, `input.lua`, `despawn.lua`) and `coverage.lua`,
+//! `logic.lua`, `math.lua`, `components.lua`, `input.lua`, `despawn.lua`, `stats.lua`,
+//! `charged.lua`) and `coverage.lua`,
 //! built from the node catalog so it uses every pure node.
 //!
 //! They're normal visual scripts: open them in the editor to change them.
 //!
 //! Run it with `cargo run -p vs_tests --example write_scripts` after adding or changing nodes.
 
-use vs_graph::{Graph, PinRef, Value, Variable};
+use vs_graph::{ComponentDef, Graph, PinRef, Value, Variable};
 
 fn link(g: &mut Graph, a: u32, pa: &str, b: u32, pb: &str) {
     assert!(g.link(PinRef::new(a, pa), PinRef::new(b, pb)), "{pa} -> {pb}");
@@ -26,6 +27,87 @@ fn main() {
     write("components.lua", &components());
     write("input.lua", &input());
     write("despawn.lua", &despawn());
+    write("stats.lua", &stats());
+    // `charged.lua` uses what `stats.lua` declares: learn it from the file just written.
+    vs_graph::components::load_project(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    write("charged.lua", &charged());
+}
+
+fn declare(g: &mut Graph, name: &str, fields: &[(&str, Value)]) {
+    let fields = fields.iter().map(|(n, v)| Variable { name: n.to_string(), value: v.clone() }).collect();
+    g.add_component_def(ComponentDef { name: name.into(), fields }, 0.0, 0.0);
+}
+
+/// Only declares a component, `Stats`, which `charged.lua` reads and writes.
+fn stats() -> Graph {
+    let mut g = Graph::default();
+    declare(
+        &mut g,
+        "Stats",
+        &[("power", Value::Number(1.5)), ("drift", Value::Vec3([0.5, 0.0, 0.25])), ("on", Value::Bool(true))],
+    );
+    g
+}
+
+/// Declares `Charge` and uses it with `Stats` from `stats.lua`: charges up at `power` per second
+/// and drifts while below 3, then empties the charge and gets stronger.
+fn charged() -> Graph {
+    let mut g = Graph::default();
+    declare(&mut g, "Charge", &[("level", Value::Number(0.0))]);
+    let node = |g: &mut Graph, kind: &str| g.add_node(kind, None, 0.0, 0.0);
+    let get = |g: &mut Graph, field: &str| g.add_field_node("component.get", field, 0.0, 0.0);
+    let put = |g: &mut Graph, field: &str| g.add_field_node("component.set", field, 0.0, 0.0);
+    let update = node(&mut g, "event.update");
+
+    // level += delta * power
+    let power = get(&mut g, "Stats.power");
+    let gain = node(&mut g, "math.mul");
+    link(&mut g, update, "delta", gain, "a");
+    link(&mut g, power, "value", gain, "b");
+    let level = get(&mut g, "Charge.level");
+    let more = node(&mut g, "math.add");
+    link(&mut g, level, "value", more, "a");
+    link(&mut g, gain, "result", more, "b");
+    let set_level = put(&mut g, "Charge.level");
+    link(&mut g, update, "then", set_level, "in");
+    link(&mut g, more, "result", set_level, "value");
+
+    // on = level < 3
+    let below = node(&mut g, "logic.lt");
+    let level_now = get(&mut g, "Charge.level");
+    link(&mut g, level_now, "value", below, "a");
+    set(&mut g, below, "b", Value::Number(3.0));
+    let set_on = put(&mut g, "Stats.on");
+    link(&mut g, set_level, "then", set_on, "in");
+    link(&mut g, below, "result", set_on, "value");
+
+    // on: translation += drift * delta. Off: level = 0, power += 0.5.
+    let branch = node(&mut g, "flow.branch");
+    link(&mut g, set_on, "then", branch, "in");
+    let on = get(&mut g, "Stats.on");
+    link(&mut g, on, "value", branch, "condition");
+    let drift = get(&mut g, "Stats.drift");
+    let step = node(&mut g, "vector.scale");
+    link(&mut g, drift, "value", step, "v");
+    link(&mut g, update, "delta", step, "factor");
+    let position = get(&mut g, "Transform.translation");
+    let moved = node(&mut g, "vector.add");
+    link(&mut g, position, "value", moved, "a");
+    link(&mut g, step, "result", moved, "b");
+    let set_position = put(&mut g, "Transform.translation");
+    link(&mut g, branch, "true", set_position, "in");
+    link(&mut g, moved, "result", set_position, "value");
+    let empty = put(&mut g, "Charge.level");
+    set(&mut g, empty, "value", Value::Number(0.0));
+    link(&mut g, branch, "false", empty, "in");
+    let stronger = node(&mut g, "math.add");
+    let power_now = get(&mut g, "Stats.power");
+    link(&mut g, power_now, "value", stronger, "a");
+    set(&mut g, stronger, "b", Value::Number(0.5));
+    let set_power = put(&mut g, "Stats.power");
+    link(&mut g, empty, "then", set_power, "in");
+    link(&mut g, stronger, "result", set_power, "value");
+    g
 }
 
 /// Every key and mouse button state, each moving the entity its own way.

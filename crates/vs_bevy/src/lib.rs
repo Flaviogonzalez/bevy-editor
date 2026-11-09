@@ -99,20 +99,21 @@ struct Runtime {
 struct WorldComponents<'w> {
     world: &'w mut World,
     registry: &'w AppTypeRegistry,
+    declared: &'w components::Declared,
     entity: Entity,
 }
 
 impl Components for WorldComponents<'_> {
     fn get(&self, component: &str, path: &str) -> Result<vs_nodes::Arg, String> {
-        components::get(self.world, &self.registry.read(), self.entity, component, path)
+        components::get(self.world, &self.registry.read(), self.declared, self.entity, component, path)
     }
 
     fn kind(&self, component: &str, path: &str) -> Result<vs_nodes::PinKind, String> {
-        components::kind(&self.registry.read(), component, path)
+        components::kind(&self.registry.read(), self.declared, component, path)
     }
 
     fn set(&mut self, component: &str, path: &str, value: vs_nodes::Arg) -> Result<(), String> {
-        components::set(self.world, &self.registry.read(), self.entity, component, path, value)
+        components::set(self.world, &self.registry.read(), self.declared, self.entity, component, path, value)
     }
 }
 
@@ -139,6 +140,7 @@ fn run_scripts(world: &mut World, events: &mut SystemState<MessageReader<AssetEv
         query.iter(world).map(|(e, s, t)| (e, s.0.clone(), *t)).collect();
     runtime.running.retain(|entity, _| targets.iter().any(|(e, ..)| e == entity));
     let registry = world.resource::<AppTypeRegistry>().clone();
+    let declared = world.get_resource::<components::Declared>().cloned().unwrap_or_default();
 
     for (entity, handle, transform) in targets {
         let id = handle.id();
@@ -167,7 +169,7 @@ fn run_scripts(world: &mut World, events: &mut SystemState<MessageReader<AssetEv
             world.get_resource::<ButtonInput<MouseButton>>(),
             transform,
         );
-        let mut access = WorldComponents { world, registry: &registry, entity };
+        let mut access = WorldComponents { world, registry: &registry, declared: &declared, entity };
         match instance.update_with(frame, &mut access) {
             Ok(after) => {
                 // Only write when the script moved something, so change detection stays useful.

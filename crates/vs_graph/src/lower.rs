@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::components;
 use crate::graph::{Graph, Node, NodeId, PinRef, Side, Value};
-use crate::ir::{Action, Axis, Block, ComponentUse, Device, EffectOp, Event, Intrinsic, Let, Lit, Module, Operand, Press, Step, Variable};
+use crate::ir::{Action, Axis, Block, ComponentUse, Declared, Device, EffectOp, Event, Intrinsic, Let, Lit, Module, Operand, Press, Step, Variable};
 use crate::library::{self, PinType};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,16 +48,22 @@ pub fn lower(graph: &Graph) -> Lowered {
         components: Vec::new(),
     };
 
+    let mut declares = Vec::new();
     for node in &graph.nodes {
         match library::find(&node.kind) {
             None => l.error(node.id, format!("Unknown node type `{}`", node.kind)),
+            Some(def) if def.is_definition() => {
+                if let Some(declared) = l.declaration(node) {
+                    declares.push(declared);
+                }
+            }
             Some(def) if def.is_variable() => match &node.var {
                 Some(name) if graph.variable(name).is_some() => {}
                 Some(name) => l.error(node.id, format!("Variable `{name}` doesn't exist")),
                 None => l.error(node.id, "Variable node without a variable".into()),
             },
             Some(def) if def.is_field() => match &node.field {
-                Some(field) if components::field(field).is_some() => {}
+                Some(field) if components::field_in(graph, field).is_some() => {}
                 Some(field) => l.error(
                     node.id,
                     format!("Unknown component field `{field}`. If it's the game's own, run the preview once so the editor learns it"),
@@ -99,7 +105,7 @@ pub fn lower(graph: &Graph) -> Lowered {
         }
     }
 
-    let module = Module { variables, states: l.state_names, components: l.components, blocks };
+    let module = Module { variables, states: l.state_names, components: l.components, blocks, declares };
     Lowered { module, problems: l.problems }
 }
 
@@ -202,7 +208,7 @@ impl Lowerer<'_> {
     /// The component and path a Get / Set Component node refers to, adding the component to the
     /// ones the script uses.
     fn field(&mut self, node: &Node) -> Option<(usize, String, PinType)> {
-        let (component, field) = components::field(node.field.as_deref()?)?;
+        let (component, field) = components::field_in(self.graph, node.field.as_deref()?)?;
         let index = match self.components.iter().position(|c| c.name == component.name) {
             Some(i) => i,
             None => {
@@ -211,6 +217,47 @@ impl Lowerer<'_> {
             }
         };
         Some((index, field.path, field.ty))
+    }
+
+    /// Checks a Define Component node: the component needs a type name that nothing else uses,
+    /// and its fields need distinct snake_case names, since the preview reaches them by those
+    /// names through reflection. `None` when it has errors.
+    fn declaration(&mut self, node: &Node) -> Option<Declared> {
+        let Some(def) = &node.component else {
+            self.error(node.id, "Component card without a declaration".into());
+            return None;
+        };
+        let name = &def.name;
+        let mut ok = true;
+        let type_name = name.starts_with(|c: char| c.is_ascii_uppercase()) && name.chars().all(|c| c.is_ascii_alphanumeric());
+        if !type_name {
+            self.error(
+                node.id,
+                format!("`{name}` isn't a component name: start with a capital letter and use only letters and digits, such as `Health`"),
+            );
+            ok = false;
+        } else if crate::rust::is_reserved_type(name) || components::is_bundled(name) {
+            self.error(node.id, format!("`{name}` is already a Bevy type: pick another name"));
+            ok = false;
+        }
+        let first = self.graph.defined_components().position(|d| d.name == *name);
+        let this = self.graph.nodes.iter().filter(|n| n.component.is_some()).position(|n| n.id == node.id);
+        if first != this {
+            self.error(node.id, format!("`{name}` is declared twice in this script"));
+            ok = false;
+        }
+        for (i, field) in def.fields.iter().enumerate() {
+            let f = &field.name;
+            if !crate::rust::is_field_name(f) {
+                self.error(node.id, format!("Field `{f}` of `{name}` needs a snake_case name, such as `max_value`"));
+                ok = false;
+            } else if def.fields[..i].iter().any(|other| other.name == *f) {
+                self.error(node.id, format!("`{name}` has two fields named `{f}`"));
+                ok = false;
+            }
+        }
+        let fields = def.fields.iter().map(|f| Variable { name: f.name.clone(), initial: lit_of(&f.value) }).collect();
+        ok.then(|| Declared { name: name.clone(), fields })
     }
 
     fn var(&self, node: &Node) -> Option<usize> {

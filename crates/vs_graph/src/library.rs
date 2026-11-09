@@ -58,6 +58,9 @@ pub struct PinDef {
     pub default: Option<Value>,
 }
 
+/// The kind of the node that declares a component. It has no pins: it's data, not logic.
+pub const DEFINE_COMPONENT: &str = "define.component";
+
 #[derive(Clone, Debug)]
 pub struct NodeDef {
     pub kind: &'static str,
@@ -75,6 +78,11 @@ impl NodeDef {
 
     pub fn is_variable(&self) -> bool {
         self.kind.starts_with("var.")
+    }
+
+    /// The card that declares a component (see [`DEFINE_COMPONENT`]).
+    pub fn is_definition(&self) -> bool {
+        self.kind == DEFINE_COMPONENT
     }
 
     /// Get / Set Component: one menu entry per component field.
@@ -298,6 +306,14 @@ fn build() -> Vec<NodeDef> {
         def("time.elapsed", "Elapsed Time", "Time", "Seconds since the app started.", vec![], vec![out("seconds", Number)]),
         // Components. Their `Any` pins take the field's type.
         def(
+            DEFINE_COMPONENT,
+            "Component",
+            "Components",
+            "Declares a component: a name and fields with starting values. Any script in the project can Get and Set its fields.",
+            vec![],
+            vec![],
+        ),
+        def(
             "component.get",
             "Get",
             "Components",
@@ -318,7 +334,7 @@ fn build() -> Vec<NodeDef> {
         def("var.set", "Set", "Variables", "Writes a graph variable.", vec![exec("in"), any("value")], vec![exec("then"), any("value")]),
     ];
     // Pure nodes go before the components and variables, so the menu keeps its order.
-    let at = defs.len() - 4;
+    let at = defs.len() - 5;
     defs.splice(at..at, vs_nodes::catalog().into_iter().map(pure));
     defs
 }

@@ -142,6 +142,10 @@ impl Editor {
         let filter = menu.filter.to_lowercase();
         let mut entries = Vec::new();
         for def in library::all() {
+            // The component card needs its own drawing and editing on the canvas first.
+            if def.is_definition() {
+                continue;
+            }
             if def.is_variable() {
                 for var in &self.doc.graph.variables {
                     entries.push(MenuEntry {
@@ -196,6 +200,7 @@ impl Editor {
             var: entry.var.clone(),
             field: entry.field.clone(),
             name: None,
+            component: None,
         };
         let pins = self.doc.graph.pins_of(&probe);
         let candidates = match side {

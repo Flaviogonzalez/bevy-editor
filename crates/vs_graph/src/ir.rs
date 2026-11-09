@@ -222,9 +222,24 @@ pub struct Module {
     /// The components the script reads or writes, `Transform` included.
     pub components: Vec<ComponentUse>,
     pub blocks: Vec<Block>,
+    /// The components the script declares, with their fields' starting values.
+    pub declares: Vec<Declared>,
+}
+
+/// A component declared by a Define Component node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Declared {
+    pub name: String,
+    pub fields: Vec<Variable>,
 }
 
 impl Module {
+    /// Whether the script only declares components, so it gets no component of its own (see
+    /// [`crate::Graph::declares_only`]). States only come from events, so they need not be checked.
+    pub fn declares_only(&self) -> bool {
+        !self.declares.is_empty() && self.variables.is_empty() && self.blocks.is_empty()
+    }
+
     pub fn has_start(&self) -> bool {
         self.blocks.iter().any(|b| b.event == Event::Start)
     }
