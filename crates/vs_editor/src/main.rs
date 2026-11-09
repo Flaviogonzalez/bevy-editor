@@ -2,13 +2,14 @@
 //! scripts.
 
 mod actions;
+mod app;
+mod canvas;
 mod editor;
 mod history;
-mod layout;
-mod project;
-mod render;
-mod tasks;
+mod panels;
 mod theme;
+mod ui;
+mod workspace;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, AppContext, Bounds, QuitMode, TitlebarOptions, WindowBounds, WindowOptions, px, size};

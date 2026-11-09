@@ -1,4 +1,4 @@
-//! Editor state and everything that changes it. Drawing lives in `render.rs`.
+//! Editor state and everything that changes it. Drawing lives in `app.rs`, `canvas/` and `panels/`.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -9,8 +9,8 @@ use gpui_kit::{Context, FocusHandle, KeyDownEvent, Window};
 use vs_graph::{Graph, NodeId, PinRef, PinType, Side, Value, Variable, library};
 
 use crate::history::History;
-use crate::layout::{self, Hit, NodeLayout, Rect, V2};
-use crate::tasks::Task;
+use crate::canvas::layout::{self, Hit, NodeLayout, Rect, V2};
+use crate::workspace::tasks::Task;
 
 pub const MIN_ZOOM: f32 = 0.3;
 pub const MAX_ZOOM: f32 = 2.0;

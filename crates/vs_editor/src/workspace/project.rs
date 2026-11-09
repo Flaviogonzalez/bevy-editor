@@ -7,7 +7,7 @@ use gpui_kit::{Context, Window};
 use vs_project::Project;
 
 use crate::editor::{BottomTab, Dialog, Editor};
-use crate::tasks::{Outcome, Task, Then};
+use crate::workspace::tasks::{Outcome, Task, Then};
 
 impl Editor {
     pub fn open_settings(&mut self) {
