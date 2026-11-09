@@ -2,9 +2,11 @@
 //! the game (preview) or building it for release. The dialogs that create projects and scripts
 //! live in `panels/dialog.rs` and call into here.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use gpui_kit::{Context, Window};
+use vs_graph::{Compiled, NodeId, Problem, Severity, access};
 use vs_project::Project;
 
 use crate::editor::Editor;
@@ -38,7 +40,66 @@ impl Editor {
             vs_graph::components::set_project(Vec::new());
         }
         self.workspace.project = Some(project);
+        self.scan_systems();
         loaded
+    }
+
+    /// Reads the systems of the project's scripts other than the open one, for
+    /// [`Editor::ambiguities`]. Call it when the project, the open script or its name changes;
+    /// the other scripts only change on disk when they're open, so that's enough.
+    pub fn scan_systems(&mut self) {
+        let own = self.doc.file_name();
+        let scripts = self.workspace.project.as_ref().map(|p| p.scripts()).unwrap_or_default();
+        self.workspace.others = scripts
+            .into_iter()
+            .filter_map(|path| {
+                let file = path.file_name()?.to_string_lossy().into_owned();
+                if file == own {
+                    return None;
+                }
+                let graph = vs_graph::load_from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+                let systems = access::systems(&vs_graph::lower(&graph).module, &vs_graph::rust::names(&file));
+                Some((file, systems))
+            })
+            .collect();
+    }
+
+    /// A warning on each event whose system Bevy's ambiguity detection would report together
+    /// with systems of the project's other scripts (see [`access::ambiguities`]).
+    pub fn ambiguities(&self, compiled: &Compiled) -> Vec<Problem> {
+        let own: Vec<(NodeId, access::System)> = self.systems(compiled).into_iter().collect();
+        let mut scripts = vec![own.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>()];
+        scripts.extend(self.workspace.others.iter().map(|(_, systems)| systems.clone()));
+        // For each of the open script's systems, the others it's ambiguous with, grouped by the
+        // components they conflict on: `Transform` → [`update_math` (math.lua), …].
+        let mut found: Vec<BTreeMap<String, Vec<String>>> = vec![BTreeMap::new(); own.len()];
+        for a in access::ambiguities(&scripts).into_iter().filter(|a| a.a.script == 0) {
+            let (file, systems) = &self.workspace.others[a.b.script - 1];
+            let other = format!("`{}` ({file})", systems[a.b.system].name);
+            found[a.a.system].entry(a.components.join(", ")).or_default().push(other);
+        }
+        own.iter()
+            .zip(found)
+            .filter(|(_, groups)| !groups.is_empty())
+            .map(|((node, system), groups)| {
+                let groups: Vec<String> = groups
+                    .into_iter()
+                    .map(|(components, others)| {
+                        let count = if others.len() == 1 { "1 system".to_string() } else { format!("{} systems", others.len()) };
+                        format!("{count} on {components}: {}", others.join(", "))
+                    })
+                    .collect();
+                Problem {
+                    severity: Severity::Warning,
+                    node: Some(*node),
+                    message: format!(
+                        "`{}` has no order with {}. Bevy's ambiguity detection reports each pair",
+                        system.name,
+                        groups.join("; "),
+                    ),
+                }
+            })
+            .collect()
     }
 
     /// Makes `project` current and opens its first script.

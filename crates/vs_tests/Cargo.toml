@@ -6,7 +6,7 @@ publish = false
 description = "Checks that the Lua preview and the generated Rust behave identically, on scripts that use every node."
 
 [dependencies]
-bevy = { version = "0.19.1", default-features = false, features = ["std", "bevy_log", "bevy_color", "keyboard", "mouse"] }
+bevy = { version = "0.19.1", default-features = false, features = ["std", "bevy_log", "bevy_color", "keyboard", "mouse", "debug"] }
 
 [build-dependencies]
 vs_graph.workspace = true

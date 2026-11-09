@@ -1,6 +1,6 @@
 //! Writes the differential test's scripts into `assets/scripts`: hand-built ones (`demo.lua`,
 //! `logic.lua`, `math.lua`, `components.lua`, `input.lua`, `despawn.lua`, `stats.lua`,
-//! `charged.lua`) and `coverage.lua`,
+//! `charged.lua`, `watcher.lua`) and `coverage.lua`,
 //! built from the node catalog so it uses every pure node.
 //!
 //! They're normal visual scripts: open them in the editor to change them.
@@ -31,6 +31,22 @@ fn main() {
     // `charged.lua` uses what `stats.lua` declares: learn it from the file just written.
     vs_graph::components::load_project(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
     write("charged.lua", &charged());
+    write("watcher.lua", &watcher());
+}
+
+/// Only reads what other scripts write, so the ambiguity test sees conflicts beyond
+/// `Transform`: its Start event prints `Stats.power` (`charged.lua` writes it), and its Update
+/// event prints `Wobble.amount` (`components.lua` writes it).
+fn watcher() -> Graph {
+    let mut g = Graph::default();
+    for (event, field) in [("event.start", "Stats.power"), ("event.update", "Wobble.amount")] {
+        let event = g.add_node(event, None, 0.0, 0.0);
+        let print = g.add_node("action.print", None, 0.0, 0.0);
+        let value = g.add_field_node("component.get", field, 0.0, 0.0);
+        link(&mut g, event, "then", print, "in");
+        link(&mut g, value, "value", print, "value");
+    }
+    g
 }
 
 fn declare(g: &mut Graph, name: &str, fields: &[(&str, Value)]) {

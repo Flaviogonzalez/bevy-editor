@@ -215,6 +215,79 @@ fn project_component_list_is_current() {
     assert_eq!(serde_json::to_value(&described).unwrap(), written);
 }
 
+/// The pairs of systems Bevy's ambiguity detection reports for the compiled scripts are the
+/// pairs `vs_graph::access` predicts from the IR, conflicting on the same components. Each pair is
+/// written `script::system` both ways, with its components by short name.
+#[test]
+fn predicted_ambiguities_match_bevy() {
+    type Pair = (String, String, Vec<String>);
+    fn pair(a: String, b: String, mut components: Vec<String>) -> Pair {
+        components.sort();
+        if a <= b { (a, b, components) } else { (b, a, components) }
+    }
+    // The last two segments of a path: `differential::native::demo::update_demo` → `demo::update_demo`.
+    fn tail(path: &str, n: usize) -> String {
+        let parts: Vec<&str> = path.split("::").collect();
+        parts[parts.len().saturating_sub(n)..].join("::")
+    }
+
+    let mut app = base_app();
+    app.add_plugins(native::ScriptsPlugin);
+    let world = app.world_mut();
+    let mut reported: Vec<Pair> = {
+        let mut schedule = world.resource_mut::<Schedules>().remove(Update).expect("the scripts add systems to Update");
+        schedule.initialize(world).unwrap();
+        // Initializing moves the systems out of the graph, so they're named from the schedule.
+        let system_names: std::collections::HashMap<_, _> =
+            schedule.systems().unwrap().map(|(key, system)| (key, system.name().to_string())).collect();
+        schedule
+            .graph()
+            .conflicting_systems()
+            .0
+            .iter()
+            .map(|(a, b, ids)| {
+                let components =
+                    ids.iter().map(|id| tail(&world.components().get_name(*id).unwrap().to_string(), 1)).collect();
+                pair(tail(&system_names[a], 2), tail(&system_names[b], 2), components)
+            })
+            .collect()
+    };
+
+    // The same scripts, lowered as `build.rs` does.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    vs_graph::components::load_project(root).unwrap();
+    let mut files: Vec<_> = std::fs::read_dir(root.join("assets/scripts"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "lua"))
+        .collect();
+    files.sort();
+    let names: Vec<_> = files.iter().map(|f| vs_graph::rust::names(&f.to_string_lossy())).collect();
+    let scripts: Vec<Vec<vs_graph::access::System>> = files
+        .iter()
+        .zip(&names)
+        .map(|(file, names)| {
+            let graph = vs_graph::load_from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+            vs_graph::access::systems(&vs_graph::lower(&graph).module, names)
+        })
+        .collect();
+    let at = |at: vs_graph::access::At| format!("{}::{}", names[at.script].module, scripts[at.script][at.system].name);
+    let mut predicted: Vec<Pair> = vs_graph::access::ambiguities(&scripts)
+        .into_iter()
+        .map(|a| pair(at(a.a), at(a.b), a.components))
+        .collect();
+
+    reported.sort();
+    predicted.sort();
+    assert_eq!(predicted, reported);
+    // Several scripts move their entity, and `watcher.lua` reads a declared component and a game
+    // component that others write, so the rule is checked beyond `Transform`.
+    let on = |c: &str| reported.iter().filter(|(_, _, cs)| cs.iter().any(|x| x == c)).count();
+    assert!(on("Transform") > 10, "{reported:?}");
+    assert!(reported.contains(&pair("charged::update_charged".into(), "watcher::setup_watcher".into(), vec!["Stats".into()])));
+    assert!(reported.contains(&pair("components::update_components".into(), "watcher::update_watcher".into(), vec!["Wobble".into()])));
+}
+
 /// Small deterministic generator, so a failing seed reproduces.
 struct Rng(u64);
 

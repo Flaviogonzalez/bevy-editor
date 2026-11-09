@@ -16,7 +16,9 @@ use crate::theme;
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = window;
-        let compiled = vs_graph::compile(&self.doc.graph);
+        let mut compiled = vs_graph::compile(&self.doc.graph);
+        let ambiguities = self.ambiguities(&compiled);
+        compiled.problems.extend(ambiguities);
         let layouts = self.doc.layouts();
 
         actions::register(div(), cx)

@@ -5,6 +5,9 @@
 //!
 //! Input: a script's [`Module`] and its Rust [`Names`]. Output: one [`System`] per event, in the
 //! order the script's plugin adds them (Start events first, then the rest in graph order).
+//!
+//! From several scripts' systems, [`ambiguities`] finds the pairs Bevy's ambiguity detection
+//! (`ScheduleBuildSettings::ambiguity_detection`) reports, by the same rule Bevy applies.
 
 use std::collections::BTreeSet;
 
@@ -142,6 +145,66 @@ impl System {
     pub fn writes(&self) -> BTreeSet<&str> {
         self.items.iter().filter(|i| i.write).map(|i| i.name.as_str()).collect()
     }
+}
+
+/// Where a system is: by script, in the order given to [`ambiguities`], then by position in
+/// that script's systems.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct At {
+    pub script: usize,
+    pub system: usize,
+}
+
+/// Two systems Bevy's ambiguity detection reports: nothing orders one before the other, and one
+/// writes a component the other reads or writes, so which of them runs first, and so what each
+/// sees, may change from frame to frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ambiguity {
+    pub a: At,
+    pub b: At,
+    /// The components they conflict on, by short name, sorted.
+    pub components: Vec<String>,
+}
+
+/// The ambiguous pairs among several scripts' systems, each script's as [`systems`] returns them.
+///
+/// This is Bevy's rule (`Systems::get_conflicting_systems`) for what these systems can ask for.
+/// A script's plugin chains its systems, so only systems of different scripts are unordered.
+/// Two unordered systems conflict on a component one writes and the other reads or writes; the
+/// `With` filter isn't an access, and the systems never filter with `Without`, so no two queries
+/// are known to match different entities. Resources aren't compared, since every one these
+/// systems take is read-only, and `Commands` only queues changes for later.
+///
+/// Only scripts are seen: the game's own systems in `Update` can be ambiguous with them too.
+pub fn ambiguities(scripts: &[Vec<System>]) -> Vec<Ambiguity> {
+    let all: Vec<(At, &System)> = scripts
+        .iter()
+        .enumerate()
+        .flat_map(|(script, systems)| systems.iter().enumerate().map(move |(system, s)| (At { script, system }, s)))
+        .collect();
+    let mut out = Vec::new();
+    for (i, (a, sa)) in all.iter().enumerate() {
+        for (b, sb) in &all[i + 1..] {
+            if a.script == b.script {
+                continue;
+            }
+            let components = conflicts(sa, sb);
+            if !components.is_empty() {
+                out.push(Ambiguity { a: *a, b: *b, components });
+            }
+        }
+    }
+    out
+}
+
+/// The components two systems conflict on: one writes it, the other reads or writes it.
+pub fn conflicts(a: &System, b: &System) -> Vec<String> {
+    let (wa, wb) = (a.writes(), b.writes());
+    let (ra, rb) = (a.reads(), b.reads());
+    let mut out: BTreeSet<&str> = wa.intersection(&wb).copied().collect();
+    out.extend(wa.intersection(&rb));
+    out.extend(wb.intersection(&ra));
+    out.into_iter().map(String::from).collect()
 }
 
 /// A script's systems, in the order its plugin adds them.
@@ -290,6 +353,41 @@ mod tests {
         assert_eq!(s.resources.iter().map(|r| r.rust()).collect::<Vec<_>>(), ["Time"]);
         assert_eq!(s.writes(), BTreeSet::from(["Transform"]));
         assert_eq!(s.reads(), BTreeSet::from(["Spinner"]));
+    }
+
+    /// A spinner (writes `Transform`, reads its own component) and a door whose Start event reads
+    /// `Transform`, in two scripts.
+    fn two_scripts() -> Vec<Vec<System>> {
+        let spinner = crate::lower(&crate::starter()).module;
+        let mut door = crate::Graph::default();
+        let start = door.add_node("event.start", None, 0.0, 0.0);
+        let print = door.add_node("action.print", None, 200.0, 0.0);
+        let position = door.add_node("transform.position", None, 0.0, 100.0);
+        door.link(crate::PinRef::new(start, "then"), crate::PinRef::new(print, "in"));
+        door.link(crate::PinRef::new(position, "x"), crate::PinRef::new(print, "value"));
+        let door = crate::lower(&door);
+        assert!(door.problems.is_empty(), "{:?}", door.problems);
+        vec![systems(&spinner, &names("scripts/spinner.lua")), systems(&door.module, &names("scripts/door.lua"))]
+    }
+
+    #[test]
+    fn a_write_and_a_read_in_two_scripts_are_ambiguous() {
+        let scripts = two_scripts();
+        assert_eq!(scripts[1][0].query(), "Query<&Transform, Added<Door>>");
+        let found = ambiguities(&scripts);
+        assert_eq!(
+            found,
+            [Ambiguity { a: At { script: 0, system: 0 }, b: At { script: 1, system: 0 }, components: vec!["Transform".into()] }]
+        );
+    }
+
+    #[test]
+    fn systems_of_one_script_are_chained_and_reads_never_conflict() {
+        let scripts = two_scripts();
+        // The same two systems in one script run in order.
+        assert!(ambiguities(&[scripts.concat()]).is_empty());
+        // Two readers of `Transform` don't conflict.
+        assert!(ambiguities(&[scripts[1].clone(), scripts[1].clone()]).is_empty());
     }
 
     #[test]

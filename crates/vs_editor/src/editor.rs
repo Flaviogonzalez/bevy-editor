@@ -216,6 +216,8 @@ impl Editor {
             return;
         }
         self.reset(Document::default());
+        // The script that was open is one of the others now.
+        self.scan_systems();
         self.update_title(window);
     }
 
@@ -292,6 +294,8 @@ impl Editor {
         match self.doc.write_to(&path) {
             Ok(()) => {
                 self.chrome.status = format!("Saved {}", path.display());
+                // Saving under another name makes the old file one of the others.
+                self.scan_systems();
                 self.update_title(window);
             }
             Err(e) => self.chrome.status = format!("Couldn't save {}: {e}", path.display()),
