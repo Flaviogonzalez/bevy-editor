@@ -1,52 +1,68 @@
-//! Colors. One dark palette for now.
+//! The editor's colors. Interface colors are read from gpui-component's active theme
+//! (`cx.theme()`, shadcn-style tokens), so changing that theme restyles the whole editor; this
+//! module only says which token each part of the editor uses. Pin and category colors encode
+//! data (a pin's type, a node's category), not the look, so they stay fixed.
 
-use gpui_kit::{Rgba, rgb};
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::{App, Hsla, Rgba, rgb};
 use vs_graph::PinType;
 
-pub fn canvas_bg() -> Rgba {
-    rgb(0x1a1c21)
+pub fn canvas_bg(cx: &App) -> Hsla {
+    cx.theme().background
 }
-pub fn grid_minor() -> Rgba {
-    rgb(0x22252b)
+pub fn grid_minor(cx: &App) -> Hsla {
+    cx.theme().border.opacity(0.35)
 }
-pub fn grid_major() -> Rgba {
-    rgb(0x2b2f37)
+pub fn grid_major(cx: &App) -> Hsla {
+    cx.theme().border.opacity(0.8)
 }
-pub fn panel_bg() -> Rgba {
-    rgb(0x22252b)
+pub fn panel_bg(cx: &App) -> Hsla {
+    cx.theme().sidebar
 }
-pub fn toolbar_bg() -> Rgba {
-    rgb(0x1e2025)
+pub fn toolbar_bg(cx: &App) -> Hsla {
+    cx.theme().title_bar
 }
-pub fn border() -> Rgba {
-    rgb(0x353a44)
+pub fn border(cx: &App) -> Hsla {
+    cx.theme().border
 }
-pub fn text() -> Rgba {
-    rgb(0xd8dbe1)
+pub fn text(cx: &App) -> Hsla {
+    cx.theme().foreground
 }
-pub fn dim() -> Rgba {
-    rgb(0x8a909b)
+pub fn dim(cx: &App) -> Hsla {
+    cx.theme().muted_foreground
 }
-pub fn accent() -> Rgba {
-    rgb(0x4d8df7)
+/// Selection and focus outlines: selected nodes, the field being edited, the search box.
+pub fn selection(cx: &App) -> Hsla {
+    cx.theme().primary
 }
-pub fn node_bg() -> Rgba {
-    rgb(0x2a2e36)
+/// The background of the highlighted row or the active tab.
+pub fn highlight(cx: &App) -> Hsla {
+    cx.theme().accent
 }
-pub fn field_bg() -> Rgba {
-    rgb(0x1b1e23)
+/// A filled call-to-action, such as a dialog's confirm button, and the text on it.
+pub fn primary(cx: &App) -> (Hsla, Hsla) {
+    (cx.theme().primary, cx.theme().primary_foreground)
 }
-pub fn button_bg() -> Rgba {
-    rgb(0x2c3038)
+pub fn node_bg(cx: &App) -> Hsla {
+    cx.theme().popover
 }
-pub fn error() -> Rgba {
-    rgb(0xe06c6c)
+pub fn field_bg(cx: &App) -> Hsla {
+    cx.theme().background
 }
-pub fn warning() -> Rgba {
-    rgb(0xd9a74a)
+pub fn button_bg(cx: &App) -> Hsla {
+    cx.theme().secondary
 }
-pub fn ok() -> Rgba {
-    rgb(0x6cc070)
+pub fn button_hover(cx: &App) -> Hsla {
+    cx.theme().secondary_hover
+}
+pub fn error(cx: &App) -> Hsla {
+    cx.theme().danger
+}
+pub fn warning(cx: &App) -> Hsla {
+    cx.theme().warning
+}
+pub fn ok(cx: &App) -> Hsla {
+    cx.theme().success
 }
 
 pub fn category(category: &str) -> Rgba {
