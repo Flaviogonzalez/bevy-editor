@@ -1,104 +1,17 @@
-//! Projects in the editor: settings, creating and opening projects and scripts, and running the
-//! game (preview) or building it for release.
+//! Projects in the editor: opening a project, loading its catalog of components, and running
+//! the game (preview) or building it for release. The dialogs that create projects and scripts
+//! live in `panels/dialog.rs` and call into here.
 
 use std::time::Duration;
 
 use gpui_kit::{Context, Window};
 use vs_project::Project;
 
-use crate::editor::{BottomTab, Dialog, Editor};
+use crate::editor::Editor;
+use crate::panels::BottomTab;
 use crate::workspace::tasks::{Outcome, Task, Then};
 
 impl Editor {
-    pub fn open_settings(&mut self) {
-        self.chrome.dialog = Some(Dialog::Settings);
-    }
-
-    /// Asks for a new projects folder and saves it.
-    pub fn change_projects_dir(&mut self) {
-        let mut picker = rfd::FileDialog::new().set_title("Folder for new projects");
-        if self.workspace.config.projects_dir.exists() {
-            picker = picker.set_directory(&self.workspace.config.projects_dir);
-        }
-        let Some(dir) = picker.pick_folder() else { return };
-        self.workspace.config.projects_dir = dir;
-        match self.workspace.config.save() {
-            Ok(()) => self.chrome.status = format!("New projects go in {}", self.workspace.config.projects_dir.display()),
-            Err(e) => self.chrome.status = format!("Couldn't save the settings: {e}"),
-        }
-    }
-
-    pub fn new_project_dialog(&mut self) {
-        self.chrome.dialog = Some(Dialog::NewProject { buffer: String::new() });
-    }
-
-    pub fn new_script_dialog(&mut self) {
-        if self.workspace.project.is_some() {
-            self.chrome.dialog = Some(Dialog::NewScript { buffer: String::new() });
-        }
-    }
-
-    pub fn dialog_key(&mut self, key: &str, typed: Option<String>, window: &mut Window) {
-        match key {
-            "escape" => self.chrome.dialog = None,
-            "enter" => self.confirm_dialog(window),
-            "backspace" => {
-                if let Some(Dialog::NewProject { buffer } | Dialog::NewScript { buffer }) = &mut self.chrome.dialog {
-                    buffer.pop();
-                }
-            }
-            _ => {
-                if let (Some(t), Some(Dialog::NewProject { buffer } | Dialog::NewScript { buffer })) = (typed, &mut self.chrome.dialog) {
-                    buffer.push_str(&t);
-                }
-            }
-        }
-    }
-
-    pub fn confirm_dialog(&mut self, window: &mut Window) {
-        match self.chrome.dialog.take() {
-            Some(Dialog::NewProject { buffer }) => {
-                if !self.confirm_discard() {
-                    return;
-                }
-                match vs_project::create(&self.workspace.config.projects_dir, &buffer) {
-                    Ok(project) => {
-                        self.enter_project(project, window);
-                        self.chrome.status = format!("Created {}. Press Preview to run it", self.status_path());
-                    }
-                    Err(e) => {
-                        self.chrome.status = format!("Couldn't create the project: {e}");
-                        self.chrome.dialog = Some(Dialog::NewProject { buffer });
-                    }
-                }
-            }
-            Some(Dialog::NewScript { buffer }) => {
-                let Some(project) = self.workspace.project.clone() else { return };
-                if !self.confirm_discard() {
-                    return;
-                }
-                match project.new_script(&buffer) {
-                    Ok(path) => {
-                        self.open_path(path, window);
-                        if let Some(stem) = self.doc.path.as_ref().and_then(|p| p.file_stem()) {
-                            let ty = vs_graph::rust::names(&stem.to_string_lossy()).ty;
-                            self.chrome.status = format!("Spawn `scripts::{ty}::default()` on an entity in src/main.rs to use it");
-                        }
-                    }
-                    Err(e) => {
-                        self.chrome.status = format!("Couldn't add the script: {e}");
-                        self.chrome.dialog = Some(Dialog::NewScript { buffer });
-                    }
-                }
-            }
-            Some(Dialog::Settings) | None => {}
-        }
-    }
-
-    fn status_path(&self) -> String {
-        self.workspace.project.as_ref().map(|p| p.root.display().to_string()).unwrap_or_default()
-    }
-
     /// Picks a project folder, starting in the projects folder.
     pub fn open_project(&mut self, window: &mut Window) {
         if !self.confirm_discard() {
@@ -135,7 +48,7 @@ impl Editor {
         match first {
             Some(path) => self.open_path(path, window),
             None => {
-                self.reset(vs_graph::Graph::default(), None);
+                self.reset(crate::document::Document::default());
                 if let Err(e) = catalog {
                     self.chrome.status = e;
                 }

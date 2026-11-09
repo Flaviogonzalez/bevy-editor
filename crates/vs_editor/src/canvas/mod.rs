@@ -2,6 +2,7 @@
 //! wheel handlers that drive them.
 //!
 //! - `layout`: node geometry in graph units and hit testing, shared by drawing and input.
+//! - `input`: the mouse handlers (press, move, release) and the drags they drive.
 //! - `node`: one node drawn as a card, with its pins and inline fields.
 //! - `add_menu`: the searchable menu that adds a node.
 //! - `paint`: what is painted directly rather than as elements (grid, wires, selection box).
@@ -21,17 +22,34 @@ use gpui_kit::component::empty::{
 use gpui_kit::component::{Icon, IconName};
 use vs_graph::{Compiled, NodeId, PinType, Severity, Side};
 
-use crate::editor::{Drag, Editor, Menu};
+use crate::editor::Editor;
+pub use add_menu::Menu;
 use layout::{Hit, NodeLayout, Rect, V2};
+use vs_graph::{Graph, PinRef};
 use crate::theme;
 use paint::paint_scene;
 
 mod add_menu;
+mod input;
 pub mod layout;
 mod node;
 mod paint;
 
 pub const MENU_ROWS: usize = 10;
+
+/// What the left or right mouse button is doing right now.
+///
+/// Every drag ends in [`Editor::end_drag`], whether the button comes up over the canvas or
+/// somewhere we didn't see, so its history entry is recorded either way.
+pub enum Drag {
+    None,
+    Pan { last: V2, moved: bool, opens_menu: bool },
+    Nodes { last: V2, before: Graph, moved: bool },
+    /// A wire being pulled from `anchor`. `side` is the side of the anchor pin. `before` is the
+    /// graph before the drag when it picked up an existing wire (and so already changed the graph).
+    Wire { anchor: PinRef, side: Side, cursor: V2, before: Option<Graph> },
+    Select { start: V2, cursor: V2, additive: bool },
+}
 
 /// The pointer's interaction with the canvas. None of it is saved or undone: it describes what
 /// the mouse is doing to the document, not the document.
@@ -44,6 +62,19 @@ pub struct CanvasState {
     pub mouse: V2,
     /// The canvas origin in window coordinates and its size, written while painting.
     pub bounds: Rc<Cell<(V2, V2)>>,
+}
+
+impl CanvasState {
+    /// A window position in canvas-local coordinates.
+    pub fn to_local(&self, window_pos: gpui_kit::Point<gpui_kit::Pixels>) -> V2 {
+        let origin = self.bounds.get().0;
+        V2::new(window_pos.x.as_f32() - origin.x, window_pos.y.as_f32() - origin.y)
+    }
+
+    /// The canvas size, as last painted.
+    pub fn size(&self) -> V2 {
+        self.bounds.get().1
+    }
 }
 
 impl Default for CanvasState {
@@ -119,7 +150,7 @@ impl Editor {
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus, cx);
                     let additive = e.modifiers.shift || e.modifiers.control;
-                    this.left_down(this.to_local(e.position), additive);
+                    this.left_down(this.canvas.to_local(e.position), additive);
                     cx.notify();
                 }),
             )
@@ -127,7 +158,7 @@ impl Editor {
                 MouseButton::Right,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus, cx);
-                    this.right_down(this.to_local(e.position));
+                    this.right_down(this.canvas.to_local(e.position));
                     cx.notify();
                 }),
             )
@@ -135,39 +166,39 @@ impl Editor {
                 MouseButton::Middle,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus, cx);
-                    this.middle_down(this.to_local(e.position));
+                    this.middle_down(this.canvas.to_local(e.position));
                     cx.notify();
                 }),
             )
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
-                if this.mouse_move(this.to_local(e.position), e.pressed_button.is_some()) {
+                if this.mouse_move(this.canvas.to_local(e.position), e.pressed_button.is_some()) {
                     cx.notify();
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseUpEvent, _, cx| {
-                    this.mouse_up(this.to_local(e.position));
+                    this.mouse_up(this.canvas.to_local(e.position));
                     cx.notify();
                 }),
             )
             .on_mouse_up(
                 MouseButton::Right,
                 cx.listener(|this, e: &MouseUpEvent, _, cx| {
-                    this.mouse_up(this.to_local(e.position));
+                    this.mouse_up(this.canvas.to_local(e.position));
                     cx.notify();
                 }),
             )
             .on_mouse_up(
                 MouseButton::Middle,
                 cx.listener(|this, e: &MouseUpEvent, _, cx| {
-                    this.mouse_up(this.to_local(e.position));
+                    this.mouse_up(this.canvas.to_local(e.position));
                     cx.notify();
                 }),
             )
             .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| {
                 let dy = e.delta.pixel_delta(px(40.0)).y.as_f32();
-                this.scroll(this.to_local(e.position), dy);
+                this.doc.zoom_at(this.canvas.to_local(e.position), dy);
                 cx.notify();
             }))
             .child(painter);
@@ -249,8 +280,8 @@ impl Editor {
             let lit = self.doc.selected.contains(&link.from.node) || self.doc.selected.contains(&link.to.node);
             let base = if ty == PinType::Exec { 2.6 } else { 2.0 };
             wires.push(WireSeg {
-                a: self.to_screen(pa),
-                b: self.to_screen(pb),
+                a: self.doc.to_screen(pa),
+                b: self.doc.to_screen(pb),
                 color: if lit { theme::text(cx) } else { theme::pin(ty).into() },
                 width: (base + if lit { 0.8 } else { 0.0 }) * self.doc.zoom.max(0.6),
             });
@@ -265,15 +296,15 @@ impl Editor {
                 Side::Input => (*cursor, p),
             };
             wires.push(WireSeg {
-                a: self.to_screen(a),
-                b: self.to_screen(b),
+                a: self.doc.to_screen(a),
+                b: self.doc.to_screen(b),
                 color: theme::pin(ty).into(),
                 width: 2.0 * self.doc.zoom.max(0.6),
             });
         }
         let selection = match &self.canvas.drag {
             Drag::Select { start, cursor, .. } => {
-                Some(Rect::from_points(self.to_screen(*start), self.to_screen(*cursor)))
+                Some(Rect::from_points(self.doc.to_screen(*start), self.doc.to_screen(*cursor)))
             }
             _ => None,
         };

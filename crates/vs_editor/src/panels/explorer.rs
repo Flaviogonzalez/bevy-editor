@@ -16,6 +16,7 @@ use crate::actions;
 use crate::editor::{EditTarget, Editor};
 use crate::theme;
 use crate::ui::{dispatch, field, group, panel, panel_title};
+use crate::canvas::layout::{self, V2};
 
 impl Editor {
     /// The left panel: what you navigate and declare. The open project (its scripts and its
@@ -180,7 +181,7 @@ impl Editor {
                     };
                     menu.item(PopupMenuItem::new("Add Get node").on_click(run(|e, i| e.add_variable_node(i, "var.get"))))
                         .item(PopupMenuItem::new("Add Set node").on_click(run(|e, i| e.add_variable_node(i, "var.set"))))
-                        .item(PopupMenuItem::new("Change type").on_click(run(Editor::cycle_variable_type)))
+                        .item(PopupMenuItem::new("Change type").on_click(run(|e, i| e.doc.cycle_variable_type(i))))
                         .separator()
                         .item(PopupMenuItem::new("Delete").on_click(run(Editor::remove_variable)))
                 });
@@ -215,7 +216,7 @@ impl Editor {
                         .cursor_pointer()
                         .child(type_label)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.cycle_variable_type(i);
+                            this.doc.cycle_variable_type(i);
                             cx.notify();
                         })),
                 )
@@ -229,7 +230,7 @@ impl Editor {
                     .w(px(if wide { 96.0 } else { 56.0 }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(Value::Bool(b)) = this.doc.graph.variables.get(i).map(|v| v.value.clone()) {
-                            this.checkpoint();
+                            this.doc.checkpoint();
                             this.doc.graph.variables[i].value = Value::Bool(!b);
                         } else {
                             this.start_edit(EditTarget::VarValue(i));
@@ -246,7 +247,7 @@ impl Editor {
             .icon(IconName::Plus)
             .tooltip("Add variable")
             .on_click(cx.listener(|this, _, _, cx| {
-                this.add_variable();
+                this.doc.add_variable();
                 cx.notify();
             }));
         group("Variables", Some(add.into_any_element()), cx)
@@ -254,5 +255,21 @@ impl Editor {
                 d.child(div().text_color(theme::dim(cx)).child("No variables. A variable keeps a value between frames."))
             })
             .children(rows)
+    }
+}
+
+impl Editor {
+    /// Deletes variable `i` and its nodes. Any text edit is dropped, since edits point at
+    /// variables by index and the indices after `i` shift.
+    fn remove_variable(&mut self, i: usize) {
+        if self.doc.remove_variable(i) {
+            self.editing = None;
+        }
+    }
+
+    /// Adds a Get or Set node for variable `i` in the middle of the canvas.
+    fn add_variable_node(&mut self, i: usize, kind: &'static str) {
+        let at = self.doc.to_graph(self.canvas.size() * 0.5) - V2::new(layout::NODE_W * 0.5, 30.0);
+        self.doc.add_variable_node(i, kind, at);
     }
 }

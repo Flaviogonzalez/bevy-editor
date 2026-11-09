@@ -8,7 +8,8 @@ use gpui_kit::{
 use gpui_kit::component::{Icon, IconName};
 use vs_graph::{NodeId, PinRef, PinType, Severity, Side, Value, library};
 
-use crate::editor::{Drag, EditTarget, Editor};
+use crate::canvas::Drag;
+use crate::editor::{EditTarget, Editor};
 use crate::canvas::layout::{self, Hit, NodeLayout, V2};
 use crate::theme;
 use crate::ui::MONO;
@@ -58,7 +59,7 @@ impl Editor {
             (None, false, true) => theme::dim(cx).opacity(0.7),
             (None, false, false) => theme::border(cx),
         };
-        let screen = self.to_screen(l.rect.min);
+        let screen = self.doc.to_screen(l.rect.min);
         let rel = |p: V2| (p - l.rect.min) * z;
         let (w, h) = (l.rect.w() * z, l.rect.h() * z);
         let radius = 8.0 * z;

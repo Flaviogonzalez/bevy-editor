@@ -105,11 +105,11 @@ pub fn register<E: InteractiveElement>(el: E, cx: &mut Context<Editor>) -> E {
     let el = on::<Settings, _>(el, cx, |e, _, _| e.open_settings());
     let el = on::<Undo, _>(el, cx, |e, _, _| e.undo());
     let el = on::<Redo, _>(el, cx, |e, _, _| e.redo());
-    let el = on::<Duplicate, _>(el, cx, |e, _, _| e.duplicate_selected());
-    let el = on::<Delete, _>(el, cx, |e, _, _| e.delete_selected());
-    let el = on::<SelectAll, _>(el, cx, |e, _, _| e.doc.selected = e.doc.graph.nodes.iter().map(|n| n.id).collect());
+    let el = on::<Duplicate, _>(el, cx, |e, _, _| e.doc.duplicate_selected());
+    let el = on::<Delete, _>(el, cx, |e, _, _| e.doc.delete_selected());
+    let el = on::<SelectAll, _>(el, cx, |e, _, _| e.doc.select_all());
     let el = on::<AddNode, _>(el, cx, |e, _, _| e.open_menu(e.canvas.mouse, None));
-    let el = on::<FrameAll, _>(el, cx, |e, _, _| e.frame());
+    let el = on::<FrameAll, _>(el, cx, |e, _, _| e.doc.frame(e.canvas.size()));
     let el = on::<ToggleBottomPanel, _>(el, cx, |e, _, _| e.chrome.show_bottom_panel = !e.chrome.show_bottom_panel);
     // The project commands do nothing without a project, as their menu items are disabled then.
     let el = on::<Preview, _>(el, cx, |e, w, cx| {

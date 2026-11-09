@@ -11,7 +11,28 @@ mod explorer;
 mod inspector;
 mod toolbar;
 
-use crate::editor::{BottomTab, CodeView, Dialog};
+/// A modal dialog over the editor.
+pub enum Dialog {
+    Settings,
+    /// Asks for a name; `buffer` is what's typed so far.
+    NewProject { buffer: String },
+    NewScript { buffer: String },
+}
+
+/// The tabs of the panel under the canvas.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BottomTab {
+    Problems,
+    Output,
+    Code,
+}
+
+/// Which generated code the Code tab shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CodeView {
+    Lua,
+    Rust,
+}
 
 /// The panels' own state: what they show, independent of the open script.
 pub struct Chrome {

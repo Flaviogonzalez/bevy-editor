@@ -12,7 +12,8 @@ use gpui_kit::component::{Icon, IconName};
 use vs_graph::{Compiled, Severity};
 
 use crate::actions;
-use crate::editor::{BottomTab, CodeView, Editor};
+use crate::editor::Editor;
+use crate::panels::{BottomTab, CodeView};
 use crate::workspace::tasks::Outcome;
 use crate::theme;
 use crate::ui::{MONO, code_block, icon_button};
@@ -109,7 +110,7 @@ impl Editor {
                 .when_some(node, |d, id| d.child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(format!("#{id}"))))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(id) = node {
-                        this.focus_node(id);
+                        this.doc.focus_node(id, this.canvas.size());
                     }
                     cx.notify();
                 }))

@@ -17,7 +17,7 @@ impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = window;
         let compiled = vs_graph::compile(&self.doc.graph);
-        let layouts = self.layouts();
+        let layouts = self.doc.layouts();
 
         actions::register(div(), cx)
             .key_context(actions::CONTEXT)

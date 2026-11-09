@@ -160,7 +160,7 @@ impl Editor {
                 div()
                     .px_2()
                     .text_color(theme::dim(cx))
-                    .child(format!("{}{}", self.file_name(), if self.doc.history.is_dirty() { " •" } else { "" })),
+                    .child(format!("{}{}", self.doc.file_name(), if self.doc.history.is_dirty() { " •" } else { "" })),
             )
             .child(
                 div()
