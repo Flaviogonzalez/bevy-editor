@@ -7,6 +7,7 @@ use gpui_kit::{
     App, Div, FontWeight, Hsla, Rgba, div, prelude::*, px, rgba,
 };
 use gpui_kit::component::{Icon, IconName};
+use vs_graph::access::System;
 use vs_graph::{ComponentDef, NodeId, PinRef, PinType, Severity, Side, Value, library};
 
 use crate::canvas::Drag;
@@ -42,7 +43,14 @@ impl Editor {
     /// One node as a card: a header tinted with its category's color, then a row per pin with
     /// the pin's dot on the card's edge, its name, and an inline field for unconnected values.
     /// Selection draws a ring around the card, so the border stays free to show problems.
-    pub(super) fn node_element(&self, node: &vs_graph::Node, l: &NodeLayout, flag: Option<Severity>, cx: &App) -> Div {
+    pub(super) fn node_element(
+        &self,
+        node: &vs_graph::Node,
+        l: &NodeLayout,
+        flag: Option<Severity>,
+        system: Option<&System>,
+        cx: &App,
+    ) -> Div {
         let z = self.doc.zoom;
         let def = library::find(&node.kind);
         let (title, subject) = match (node.var.as_ref().or(node.field.as_ref()), def) {
@@ -234,6 +242,9 @@ impl Editor {
                 el = el.child(self.card_part(node.id, &view, *part, rect, l, cx));
             }
         }
+        if let Some(rect) = &l.system {
+            el = el.child(system_footer(system, rel(rect.min), rect.w() * z, z, cx));
+        }
         el
     }
 
@@ -336,6 +347,41 @@ impl Editor {
                 .child("Add field"),
         }
     }
+}
+
+/// An event node's footer: the query of the system it compiles to, then its other parameters.
+/// A long query is cut short; the Inspector shows it whole.
+fn system_footer(system: Option<&System>, at: V2, w: f32, z: f32, cx: &App) -> Div {
+    let line = |text: String| div().overflow_hidden().text_ellipsis().child(text);
+    let (query, rest) = match system {
+        Some(s) => {
+            let mut params = s.params();
+            let query = params.pop().unwrap_or_default();
+            let rest = if params.is_empty() { "no resources".to_string() } else { params.join(", ") };
+            (query, rest)
+        }
+        // An event the lowering skipped, such as a key event without a valid key.
+        None => ("not compiled".to_string(), String::new()),
+    };
+    div()
+        .absolute()
+        .left(px(at.x + 1.0))
+        .top(px(at.y))
+        .w(px(w - 2.0))
+        .h(px(layout::SYSTEM_H * z - 1.0))
+        .px(px(10.0 * z))
+        .border_t_1()
+        .border_color(theme::border(cx))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(2.0 * z))
+        .whitespace_nowrap()
+        .font_family(MONO)
+        .text_size(px(10.0 * z))
+        .text_color(theme::dim(cx))
+        .child(line(query).text_color(theme::text(cx).opacity(0.85)))
+        .child(line(rest))
 }
 
 /// What a component card draws: the component, and for a read-only copy, the file that

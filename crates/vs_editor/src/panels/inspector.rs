@@ -4,22 +4,22 @@
 use gpui_kit::{
     Context, Div, FontWeight, IntoElement, div, prelude::*, px,
 };
-use vs_graph::library;
+use vs_graph::{Compiled, library};
 
 use crate::editor::{EditTarget, Editor};
 use crate::theme;
-use crate::ui::{field, group, panel, panel_title};
+use crate::ui::{MONO, field, group, panel, panel_title};
 
 impl Editor {
     /// The right panel: what you edit. The selected node, what it does, its name and its pins.
-    pub(crate) fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn inspector(&self, compiled: &Compiled, cx: &mut Context<Self>) -> impl IntoElement {
         panel("inspector", cx)
             .border_l_1()
             .child(panel_title("Inspector", cx))
-            .child(self.node_details(cx))
+            .child(self.node_details(compiled, cx))
     }
 
-    fn node_details(&self, cx: &mut Context<Self>) -> Div {
+    fn node_details(&self, compiled: &Compiled, cx: &mut Context<Self>) -> Div {
         let hint = |text: String| div().px_3().py_3().text_color(theme::dim(cx)).child(text);
         let id = match self.doc.selected.iter().next() {
             Some(id) if self.doc.selected.len() == 1 => *id,
@@ -84,6 +84,18 @@ impl Editor {
                         cx.notify();
                     }),
                 )))
+            })
+            // An event compiles to a system: its signature, as the exported Rust has it.
+            .when_some(self.systems(compiled).remove(&id), |d, system| {
+                let param = |text: String| div().pl_4().child(format!("{text},"));
+                d.child(
+                    group("System", None, cx)
+                        .font_family(MONO)
+                        .text_size(px(11.5))
+                        .child(div().child(format!("fn {}(", system.name)))
+                        .children(system.params().into_iter().map(param))
+                        .child(div().child(")")),
+                )
             })
             .when(!pins.inputs.is_empty(), |d| {
                 d.child(group("Inputs", None, cx).children(pins.inputs.iter().map(pin_row)))

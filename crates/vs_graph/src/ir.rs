@@ -190,6 +190,8 @@ pub enum Event {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub comment: String,
+    /// The event node it comes from, so the editor can show what its system asks for.
+    pub node: crate::NodeId,
     /// The event node's name, if it has one. Exported Rust names the event's system after it.
     pub name: Option<String>,
     pub event: Event,

@@ -67,7 +67,7 @@ impl Render for Editor {
                                 .size(px(300.0))
                                 .size_range(px(220.0)..px(520.0))
                                 .fixed()
-                                .child(self.inspector(cx)),
+                                .child(self.inspector(&compiled, cx)),
                         ),
                 ),
             )

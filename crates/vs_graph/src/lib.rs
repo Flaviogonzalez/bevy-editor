@@ -8,6 +8,7 @@
 //! followed by the code compiled from it. Lua ignores the comment, so the file runs as-is; the
 //! editor reads the comment back. The graph is the source of truth: saving rewrites the code.
 
+pub mod access;
 pub mod components;
 pub mod graph;
 pub mod ir;

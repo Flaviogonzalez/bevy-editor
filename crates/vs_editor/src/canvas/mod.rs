@@ -112,6 +112,15 @@ struct Scene {
 }
 
 impl Editor {
+    /// The system each event node compiles to (see [`vs_graph::access`]), by node.
+    pub(crate) fn systems(&self, compiled: &Compiled) -> BTreeMap<NodeId, vs_graph::access::System> {
+        let names = vs_graph::rust::names(&self.doc.file_name());
+        vs_graph::access::systems(&compiled.module, &names)
+            .into_iter()
+            .map(|s| (compiled.module.blocks[s.block].node, s))
+            .collect()
+    }
+
     pub(crate) fn canvas_area(
         &self,
         layouts: &[NodeLayout],
@@ -212,9 +221,11 @@ impl Editor {
             }))
             .child(painter);
 
+        let systems = self.systems(compiled);
         for l in layouts {
             if let Some(node) = self.doc.graph.node(l.id) {
-                area = area.child(self.node_element(node, l, flagged.get(&l.id).copied(), cx));
+                let system = systems.get(&l.id);
+                area = area.child(self.node_element(node, l, flagged.get(&l.id).copied(), system, cx));
             }
         }
         if self.doc.graph.nodes.is_empty() && self.canvas.menu.is_none() {

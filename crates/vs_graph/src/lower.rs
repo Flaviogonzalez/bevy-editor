@@ -103,7 +103,7 @@ pub fn lower(graph: &Graph) -> Lowered {
         l.reached.insert(node.id);
         let mut body = Vec::new();
         l.chain(&PinRef::new(node.id, "then"), &mut body, &mut Vec::new());
-        blocks.push(Block { comment: label(node), name: node.name.clone(), event, body });
+        blocks.push(Block { comment: label(node), node: node.id, name: node.name.clone(), event, body });
     }
 
     for node in &graph.nodes {

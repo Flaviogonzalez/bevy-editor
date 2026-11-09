@@ -15,6 +15,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::visit_mut::VisitMut;
 
+use crate::access::{self, Filter, Resource, Subject};
 use crate::ir::{Action, Declared, Device, EffectOp, Event, Intrinsic, Let, Lit, Module, Operand, Step};
 use crate::library::PinType;
 use crate::lower::snake_case;
@@ -111,10 +112,10 @@ fn ident_name(text: &str) -> String {
 
 /// Hands out unique names, adding `_2`, `_3`… on repeats.
 #[derive(Default, Clone)]
-struct Namer(BTreeSet<String>);
+pub(crate) struct Namer(BTreeSet<String>);
 
 impl Namer {
-    fn take(&mut self, base: &str) -> String {
+    pub(crate) fn take(&mut self, base: &str) -> String {
         let base = ident_name(base);
         let mut name = base.clone();
         let mut n = 2;
@@ -364,24 +365,13 @@ fn script_items(script: &Script, names: &Names, systems: bool) -> TokenStream {
         reserved: bindings,
     };
     // Start events first, then the rest in graph order, as both runtimes run them.
-    let ordered = ir
-        .blocks
-        .iter()
-        .filter(|b| b.event == Event::Start)
-        .chain(ir.blocks.iter().filter(|b| b.event != Event::Start));
-    let mut functions = Namer::default();
     let mut system_fns = Vec::new();
     let mut schedule = Vec::new();
     let mut needs_condition = false;
-    for block in ordered {
-        let module = &names.module;
-        let default = match &block.event {
-            Event::Start => format!("setup_{module}"),
-            Event::Update => format!("update_{module}"),
-            Event::Key(key) => format!("on_{}_{module}", snake_case(key)),
-        };
-        let fn_name = format_ident!("{}", functions.take(block.name.as_deref().unwrap_or(&default)));
-        system_fns.push(cx.system(&fn_name, &ty, &block.body, block.event == Event::Start));
+    for system in access::systems(ir, names) {
+        let block = &ir.blocks[system.block];
+        let fn_name = format_ident!("{}", system.name);
+        system_fns.push(cx.system(&fn_name, &system, &block.body));
         schedule.push(match &block.event {
             Event::Key(key) => {
                 needs_condition = true;
@@ -424,74 +414,6 @@ fn script_items(script: &Script, names: &Names, systems: bool) -> TokenStream {
 
         #(#system_fns)*
     }
-}
-
-#[derive(Default)]
-struct Usage {
-    time: bool,
-    keys: bool,
-    mouse: bool,
-    despawn: bool,
-    transform_read: bool,
-    transform_write: bool,
-    comp_read: bool,
-    comp_write: bool,
-    /// Other components read or written, by index into `Module::components`.
-    fields_read: BTreeSet<usize>,
-    fields_write: BTreeSet<usize>,
-    /// The index of `Transform` in `Module::components`, whose fields count as transform use.
-    transform: Option<usize>,
-}
-
-fn usage(steps: &[Step], transform: Option<usize>) -> Usage {
-    fn op(o: &Operand, u: &mut Usage) {
-        match o {
-            Operand::Var(_) | Operand::State(_) => u.comp_read = true,
-            Operand::Intrinsic(Intrinsic::Delta | Intrinsic::Time) => u.time = true,
-            Operand::Intrinsic(Intrinsic::Button { device: Device::Key, .. }) => u.keys = true,
-            Operand::Intrinsic(Intrinsic::Button { device: Device::Mouse, .. }) => u.mouse = true,
-            Operand::Intrinsic(Intrinsic::Position(_)) => u.transform_read = true,
-            Operand::Field { component, .. } if Some(*component) == u.transform => u.transform_read = true,
-            Operand::Field { component, .. } => {
-                u.fields_read.insert(*component);
-            }
-            Operand::Lit(_) | Operand::Local(_) => {}
-        }
-    }
-    fn walk(steps: &[Step], u: &mut Usage) {
-        for step in steps {
-            step.lets.iter().flat_map(|l| &l.args).for_each(|a| op(a, u));
-            match &step.action {
-                Action::If { cond, then, otherwise } => {
-                    op(cond, u);
-                    walk(then, u);
-                    walk(otherwise, u);
-                }
-                Action::Despawn => u.despawn = true,
-                Action::SetVar { value, .. } | Action::SetState { value, .. } => {
-                    u.comp_write = true;
-                    op(value, u);
-                }
-                Action::SetField { component, value, .. } => {
-                    if Some(*component) == u.transform {
-                        u.transform_write = true;
-                    } else {
-                        u.fields_write.insert(*component);
-                    }
-                    op(value, u);
-                }
-                Action::Effect { op: kind, args } => {
-                    if *kind != EffectOp::Print {
-                        u.transform_write = true;
-                    }
-                    args.iter().for_each(|a| op(a, u));
-                }
-            }
-        }
-    }
-    let mut u = Usage { transform, ..Usage::default() };
-    walk(steps, &mut u);
-    u
 }
 
 fn count_uses(steps: &[Step], uses: &mut HashMap<u32, usize>) {
@@ -547,75 +469,55 @@ struct Cx<'a> {
 
 impl Cx<'_> {
     /// One system: a query over the entities with the component, asking only for what the
-    /// event's steps use, and the steps for each entity.
-    fn system(&self, name: &syn::Ident, ty: &syn::Ident, steps: &[Step], start: bool) -> TokenStream {
+    /// event's steps use (see [`access`]), and the steps for each entity.
+    fn system(&self, name: &syn::Ident, system: &access::System, steps: &[Step]) -> TokenStream {
         let mut names = self.reserved.clone();
         let body = self.steps(steps, &mut Env::new(), &mut names);
-        let transform = self.ir.components.iter().position(|c| c.name == "Transform");
-        let u = usage(steps, transform);
-        let b = &self.binding;
+        let ty = format_ident!("{}", system.own);
 
         let mut items = Vec::new();
         let mut patterns = Vec::new();
-        if u.transform_write {
-            items.push(quote!(&mut Transform));
-            patterns.push(quote!(mut transform));
-        } else if u.transform_read {
-            items.push(quote!(&Transform));
-            patterns.push(quote!(transform));
-        }
-        let has_comp = u.comp_read || u.comp_write;
-        if u.comp_write {
-            items.push(quote!(&mut #ty));
-            patterns.push(quote!(mut #b));
-        } else if u.comp_read {
-            items.push(quote!(&#ty));
-            patterns.push(quote!(#b));
-        }
-        let mut field_mutable = false;
-        for (i, c) in self.ir.components.iter().enumerate() {
-            let path: syn::Path = syn::parse_str(&c.rust_path).expect("component paths parse");
-            let bind = &self.component_bindings[i];
-            if u.fields_write.contains(&i) {
+        for item in &system.items {
+            let bind = match item.subject {
+                Subject::Entity => {
+                    items.push(quote!(Entity));
+                    patterns.push(quote!(entity));
+                    continue;
+                }
+                Subject::Transform => format_ident!("transform"),
+                Subject::Own => self.binding.clone(),
+                Subject::Component(i) => self.component_bindings[i].clone(),
+            };
+            let path: syn::Path = syn::parse_str(&item.rust_path).expect("component paths parse");
+            if item.write {
                 items.push(quote!(&mut #path));
                 patterns.push(quote!(mut #bind));
-                field_mutable = true;
-            } else if u.fields_read.contains(&i) {
+            } else {
                 items.push(quote!(&#path));
                 patterns.push(quote!(#bind));
             }
-        }
-        if u.despawn {
-            items.insert(0, quote!(Entity));
-            patterns.insert(0, quote!(entity));
         }
         let (item, pattern) = match items.len() {
             0 => (quote!(()), quote!(())),
             1 => (items.remove(0), patterns.remove(0)),
             _ => (quote!((#(#items),*)), quote!((#(#patterns),*))),
         };
-        let filter = match (start, has_comp) {
-            (true, _) => Some(quote!(Added<#ty>)),
-            (false, false) => Some(quote!(With<#ty>)),
-            (false, true) => None,
-        };
-        let query = match filter {
-            Some(f) => quote!(Query<#item, #f>),
+        let query = match system.filter {
+            Some(Filter::Added) => quote!(Query<#item, Added<#ty>>),
+            Some(Filter::With) => quote!(Query<#item, With<#ty>>),
             None => quote!(Query<#item>),
         };
-        let mutable = u.transform_write || u.comp_write || field_mutable;
+        let mutable = system.mutable();
 
         let mut params = Vec::new();
-        if u.time {
-            params.push(quote!(time: Res<Time>));
+        for resource in &system.resources {
+            params.push(match resource {
+                Resource::Time => quote!(time: Res<Time>),
+                Resource::Keys => quote!(keys: Res<ButtonInput<KeyCode>>),
+                Resource::Mouse => quote!(mouse: Res<ButtonInput<MouseButton>>),
+            });
         }
-        if u.keys {
-            params.push(quote!(keys: Res<ButtonInput<KeyCode>>));
-        }
-        if u.mouse {
-            params.push(quote!(mouse: Res<ButtonInput<MouseButton>>));
-        }
-        if u.despawn {
+        if system.commands {
             params.push(quote!(mut commands: Commands));
         }
         if mutable {
