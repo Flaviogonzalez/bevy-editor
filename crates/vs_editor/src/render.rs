@@ -7,6 +7,11 @@ use gpui_kit::{
     MouseMoveEvent, MouseUpEvent, PathBuilder, Rgba, ScrollEvent, SharedString,
     Window, canvas, div, point, prelude::*, px, rgba, size,
 };
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::empty::{
+    Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle,
+};
+use gpui_kit::component::{Icon, IconName};
 use vs_graph::{Compiled, NodeId, PinType, Severity, Side, Value, library};
 
 use crate::editor::{CodeView, Dialog, Drag, EditTarget, Editor};
@@ -299,20 +304,61 @@ impl Editor {
                 area = area.child(self.node_element(node, l, flagged.get(&l.id).copied()));
             }
         }
-        if self.graph.nodes.is_empty() {
-            area = area.child(
-                div()
-                    .absolute()
-                    .top(px(20.0))
-                    .left(px(20.0))
-                    .text_color(theme::dim())
-                    .child("Right-click or press Tab to add a node. Start with an event, such as On Update."),
-            );
+        if self.graph.nodes.is_empty() && self.menu.is_none() {
+            area = area.child(self.empty_state(cx));
         }
         if self.menu.is_some() {
             area = area.child(self.menu_element(cx));
         }
         area
+    }
+
+    /// What the canvas shows while the graph has no nodes: what to do next, instead of a blank grid.
+    fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let card = Empty::new()
+            .flex_none()
+            .w(px(380.0))
+            .bg(theme::panel_bg())
+            .border_1()
+            .header(
+                EmptyHeader::new()
+                    .media(
+                        EmptyMedia::new()
+                            .with_variant(EmptyMediaVariant::Icon)
+                            .child(Icon::new(IconName::Network)),
+                    )
+                    .title(EmptyTitle::new().child("No nodes yet"))
+                    .description(EmptyDescription::new().child(concat!(
+                        "A script starts with an event, such as On Update. ",
+                        "Add one, or right-click the canvas or press Tab at any time.",
+                    ))),
+            )
+            .content(
+                EmptyContent::new().flex_row().justify_center().gap_2().child(
+                    Button::new("empty-add-node").primary().icon(IconName::Plus).label("Add node").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            let (_, size) = this.canvas.get();
+                            this.open_menu(size * 0.5, None);
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .child(Button::new("empty-open").outline().icon(IconName::FolderOpen).label("Open script").on_click(
+                    cx.listener(|this, _, window, cx| {
+                        this.open(window);
+                        cx.notify();
+                    }),
+                )),
+            );
+
+        // Covers the canvas only to center the card; the canvas still gets clicks around it.
+        div().absolute().size_full().flex().items_center().justify_center().child(
+            div()
+                // Keeps a click on the card from also starting a selection on the canvas.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .child(card),
+        )
     }
 
     fn scene(&self, layouts: &[NodeLayout]) -> Scene {

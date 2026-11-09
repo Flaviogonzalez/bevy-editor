@@ -114,7 +114,7 @@ impl Editor {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         Self {
-            graph: starter_graph(),
+            graph: Graph::default(),
             path: None,
             pan: V2::new(60.0, 60.0),
             zoom: 1.0,
@@ -125,7 +125,7 @@ impl Editor {
             history: History::default(),
             focus,
             show_code: true,
-            status: "Right-click or press Tab on the canvas to add a node".into(),
+            status: String::new(),
             mouse: V2::default(),
             canvas: Rc::new(Cell::new((V2::default(), V2::new(800.0, 600.0)))),
             config: vs_project::Config::load(),
@@ -892,9 +892,4 @@ impl Editor {
             _ => {}
         }
     }
-}
-
-/// The graph a new window opens with: a cube spinner, so there's something to look at.
-fn starter_graph() -> Graph {
-    vs_graph::starter()
 }
