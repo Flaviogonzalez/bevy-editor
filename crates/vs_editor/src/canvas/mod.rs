@@ -144,7 +144,11 @@ impl Editor {
             move |bounds, _, window, _| {
                 let origin = V2::new(bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
                 let extent = V2::new(bounds.size.width.as_f32(), bounds.size.height.as_f32());
-                cell.set((origin, extent));
+                // The nodes of this frame were picked for the size the canvas had before (see
+                // `visible`): when it changed (the first frame, a resize), draw again.
+                if cell.replace((origin, extent)).1 != extent {
+                    window.refresh();
+                }
                 paint_scene(&scene, bounds, window);
             },
         )
@@ -220,7 +224,11 @@ impl Editor {
             .child(painter);
 
         let systems = self.systems(compiled);
-        for l in layouts {
+        // Only the nodes in view become elements. Each node is a few dozen elements that GPUI
+        // lays out and paints every frame, so with hundreds of nodes the ones off screen were
+        // most of the cost of panning. Wires are painted apart, so they still show.
+        let view = self.visible();
+        for l in layouts.iter().filter(|l| l.rect.intersects(&view)) {
             if let Some(node) = self.doc.graph.node(l.id) {
                 let system = systems.get(&l.id);
                 area = area.child(self.node_element(node, l, flagged.get(&l.id).copied(), system, cx));
@@ -233,6 +241,12 @@ impl Editor {
             area = area.child(self.menu_element(cx));
         }
         area
+    }
+
+    /// The part of the graph the canvas shows, in graph units, as of the last paint.
+    fn visible(&self) -> Rect {
+        let size = self.canvas.size();
+        Rect::from_points(self.doc.to_graph(V2::default()), self.doc.to_graph(size))
     }
 
     /// What the canvas shows while the graph has no nodes: what to do next, instead of a blank grid.
