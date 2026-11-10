@@ -226,6 +226,7 @@ impl Editor {
             name: None,
             component: None,
             copy_of: None,
+            filters: Vec::new(),
         };
         let pins = self.doc.graph.pins_of(&probe);
         let candidates = match side {

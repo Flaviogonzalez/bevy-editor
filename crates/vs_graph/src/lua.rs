@@ -7,7 +7,7 @@
 
 use std::fmt::Write as _;
 
-use crate::ir::{Action, ComponentUse, EffectOp, Event, Intrinsic, Lit, Module, Operand, Step};
+use crate::ir::{Action, Block, ComponentUse, EffectOp, Event, Intrinsic, Lit, Module, Operand, Step};
 
 pub fn emit(module: &Module) -> String {
     let mut lua = String::new();
@@ -30,7 +30,7 @@ pub fn emit(module: &Module) -> String {
         lua.push_str("\nfunction on_script_loaded()\n");
         for block in module.blocks.iter().filter(|b| b.event == Event::Start) {
             let _ = writeln!(lua, "    -- {}", block.comment);
-            steps(&mut lua, &block.body, 1, &module.components);
+            filtered(&mut lua, block, None, &module.components);
         }
         lua.push_str("end\n");
     }
@@ -41,19 +41,35 @@ pub fn emit(module: &Module) -> String {
                 Event::Start => {}
                 Event::Update => {
                     let _ = writeln!(lua, "    -- {}", block.comment);
-                    steps(&mut lua, &block.body, 1, &module.components);
+                    filtered(&mut lua, block, None, &module.components);
                 }
                 Event::Key(key) => {
                     let _ = writeln!(lua, "    -- {}", block.comment);
-                    let _ = writeln!(lua, "    if vs.input(\"key\", \"pressed\", {key:?}) then");
-                    steps(&mut lua, &block.body, 2, &module.components);
-                    lua.push_str("    end\n");
+                    let pressed = format!("vs.input(\"key\", \"pressed\", {key:?})");
+                    filtered(&mut lua, block, Some(pressed), &module.components);
                 }
             }
         }
         lua.push_str("end\n");
     }
     lua
+}
+
+/// A block's steps, run only when `condition` holds and the entity passes the block's query
+/// filters, as the compiled system's query would pick it.
+fn filtered(out: &mut String, block: &Block, condition: Option<String>, components: &[ComponentUse]) {
+    let checks = block
+        .filters
+        .iter()
+        .map(|f| format!("vs.filter(entity, {:?}, {:?})", f.op.lua(), f.component.name));
+    let all: Vec<String> = condition.into_iter().chain(checks).collect();
+    if all.is_empty() {
+        steps(out, &block.body, 1, components);
+    } else {
+        let _ = writeln!(out, "    if {} then", all.join(" and "));
+        steps(out, &block.body, 2, components);
+        out.push_str("    end\n");
+    }
 }
 
 fn pad(depth: usize) -> String {

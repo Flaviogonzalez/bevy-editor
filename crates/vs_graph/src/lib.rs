@@ -19,7 +19,7 @@ pub mod rust;
 
 pub use lower::{Lowered, Problem, Severity, lower};
 pub use vs_nodes;
-pub use graph::{ComponentDef, Graph, Link, Node, NodeId, PinRef, Side, Value, Variable};
+pub use graph::{ComponentDef, FilterOp, QueryFilter, Graph, Link, Node, NodeId, PinRef, Side, Value, Variable};
 pub use library::{NodeDef, PinDef, PinType};
 
 const MARKER: &str = "bevy-visual-script";

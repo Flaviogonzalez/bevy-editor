@@ -204,7 +204,18 @@ pub struct Block {
     /// The event node's name, if it has one. Exported Rust names the event's system after it.
     pub name: Option<String>,
     pub event: Event,
+    /// The filters the event node adds to its system's query, besides the one on the script's
+    /// own component. Both backends apply them: Rust in the query's type, Lua by checking the
+    /// entity before running the block.
+    pub filters: Vec<Filter>,
     pub body: Vec<Step>,
+}
+
+/// One filter of a block's query, with the component resolved to its Rust path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Filter {
+    pub op: crate::FilterOp,
+    pub component: ComponentUse,
 }
 
 /// A component the script reads or writes. Its own component requires it.

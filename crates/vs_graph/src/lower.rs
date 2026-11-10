@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::components;
 use crate::graph::{Graph, Node, NodeId, PinRef, Side, Value};
-use crate::ir::{Action, Axis, Block, ComponentUse, Declared, Device, EffectOp, Event, Intrinsic, Let, Lit, Module, Operand, Press, Step, Variable};use crate::library::{self, PinType};
+use crate::ir::{Action, Axis, Block, ComponentUse, Declared, Device, EffectOp, Event, Filter, Intrinsic, Let, Lit, Module, Operand, Press, Step, Variable};
+use crate::library::{self, PinType};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
@@ -106,7 +107,23 @@ pub fn lower(graph: &Graph) -> Lowered {
         let mut body = Vec::new();
         l.chain(&PinRef::new(node.id, "then"), &mut body, &mut Vec::new());
         let nodes = std::mem::take(&mut l.visited);
-        blocks.push(Block { comment: label(node), node: node.id, nodes, name: node.name.clone(), event, body });
+        let filters = l.filters(node);
+        blocks.push(Block { comment: label(node), node: node.id, nodes, name: node.name.clone(), event, filters, body });
+    }
+
+    // A `Without` on a component the entity always has never matches. The script's own component
+    // requires every component it uses, and a system that moves its entity asks for `Transform`.
+    for block in &blocks {
+        let transform = l.components.iter().position(|c| c.name == "Transform");
+        let moves = crate::access::uses_transform(&block.body, transform);
+        for f in block.filters.iter().filter(|f| f.op == crate::FilterOp::Without) {
+            let name = &f.component.name;
+            if l.components.iter().any(|c| c.name == *name) {
+                l.error(block.node, format!("`Without<{name}>` never matches: the script uses {name}, so its entities always have it"));
+            } else if name == "Transform" && moves {
+                l.error(block.node, "`Without<Transform>` never matches: this system moves its entity, so it asks for Transform".into());
+            }
+        }
     }
 
     for node in &graph.nodes {
@@ -235,6 +252,26 @@ impl Lowerer<'_> {
             }
         };
         Some((index, field.path, field.ty))
+    }
+
+    /// An event node's query filters, each component resolved the way Get / Set Component nodes
+    /// resolve theirs: the ones this script declares first, then the catalog.
+    fn filters(&mut self, node: &Node) -> Vec<Filter> {
+        let mut out = Vec::new();
+        for f in &node.filters {
+            let found = match self.graph.defined_components().find(|d| d.name == f.component) {
+                Some(def) => Some(components::declared_info(def)),
+                None => components::find(&f.component),
+            };
+            match found {
+                Some(c) => out.push(Filter { op: f.op, component: ComponentUse { name: c.name, rust_path: c.rust_path } }),
+                None => self.error(
+                    node.id,
+                    format!("Unknown component `{}` in the query. If it's the game's own, run the preview once so the editor learns it", f.component),
+                ),
+            }
+        }
+        out
     }
 
     /// Checks a Define Component node: the component needs a type name that nothing else uses,

@@ -115,6 +115,10 @@ impl Components for WorldComponents<'_> {
     fn set(&mut self, component: &str, path: &str, value: vs_nodes::Arg) -> Result<(), String> {
         components::set(self.world, &self.registry.read(), self.declared, self.entity, component, path, value)
     }
+
+    fn filter(&self, op: &str, component: &str) -> Result<bool, String> {
+        components::filter(self.world, &self.registry.read(), self.declared, self.entity, op, component)
+    }
 }
 
 /// Runs every script for one frame. Exclusive, because scripts may read and write any component

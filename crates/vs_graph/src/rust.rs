@@ -351,13 +351,19 @@ fn declared_names(scripts: &[Script]) -> BTreeSet<String> {
 /// from a script in a folder.
 fn imports(script: &Script, declared: &BTreeSet<String>) -> TokenStream {
     let up = "super::".repeat(folders(&script.path).len() + 1);
+    // The components its nodes use, then the ones only its queries' filters name.
+    let filtered = script.ir.blocks.iter().flat_map(|b| b.filters.iter().map(|f| &f.component.name));
+    let mut seen = BTreeSet::new();
     let uses = script
         .ir
         .components
         .iter()
-        .filter(|c| declared.contains(&c.name) && !script.ir.declares.iter().any(|d| d.name == c.name))
-        .map(|c| {
-            let path: syn::Path = syn::parse_str(&format!("{up}{}", c.name)).expect("component names parse");
+        .map(|c| &c.name)
+        .chain(filtered)
+        .filter(|name| declared.contains(*name) && !script.ir.declares.iter().any(|d| d.name == **name))
+        .filter(|name| seen.insert(name.as_str()))
+        .map(|name| {
+            let path: syn::Path = syn::parse_str(&format!("{up}{name}")).expect("component names parse");
             quote! { use #path; }
         });
     quote! { #(#uses)* }
@@ -822,10 +828,21 @@ impl Cx<'_> {
             1 => (items.remove(0), patterns.remove(0)),
             _ => (quote!((#(#items),*)), quote!((#(#patterns),*))),
         };
-        let query = match system.filter {
-            Some(Filter::Added) => quote!(Query<#item, Added<#ty>>),
-            Some(Filter::With) => quote!(Query<#item, With<#ty>>),
-            None => quote!(Query<#item>),
+        let own = match system.filter {
+            Some(Filter::Added) => Some(quote!(Added<#ty>)),
+            Some(Filter::With) => Some(quote!(With<#ty>)),
+            None => None,
+        };
+        let mut filters: Vec<TokenStream> = own.into_iter().collect();
+        for f in &system.filters {
+            let op = format_ident!("{}", f.op.rust());
+            let path: syn::Path = syn::parse_str(&f.component.rust_path).expect("component paths parse");
+            filters.push(quote!(#op<#path>));
+        }
+        let query = match filters.len() {
+            0 => quote!(Query<#item>),
+            1 => quote!(Query<#item, #(#filters)*>),
+            _ => quote!(Query<#item, (#(#filters),*)>),
         };
         let mutable = system.mutable();
 

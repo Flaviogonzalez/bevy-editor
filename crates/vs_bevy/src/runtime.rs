@@ -19,6 +19,9 @@ pub trait Components {
     fn get(&self, component: &str, path: &str) -> Result<Arg, String>;
     fn kind(&self, component: &str, path: &str) -> Result<PinKind, String>;
     fn set(&mut self, component: &str, path: &str, value: Arg) -> Result<(), String>;
+    /// Whether the entity passes a query filter (`with`, `without`, `added`, `changed`) on
+    /// `component`, so a block runs only on the entities its compiled system's query matches.
+    fn filter(&self, op: &str, component: &str) -> Result<bool, String>;
 }
 
 /// For running a script with no world around it: every component access fails.
@@ -32,6 +35,9 @@ impl Components for NoComponents {
         Err(format!("no {component} here"))
     }
     fn set(&mut self, component: &str, _: &str, _: Arg) -> Result<(), String> {
+        Err(format!("no {component} here"))
+    }
+    fn filter(&self, _: &str, component: &str) -> Result<bool, String> {
         Err(format!("no {component} here"))
     }
 }
@@ -131,6 +137,13 @@ impl Instance {
                     let kind = components.borrow().kind(&component, &path).map_err(fail)?;
                     let value = lua_types::from_lua(lua, kind, value)?;
                     components.borrow_mut().set(&component, &path, value).map_err(fail)
+                })?,
+            )?;
+            vs.set(
+                "filter",
+                scope.create_function(move |_, (e, op, component): (i64, String, String)| {
+                    own(e)?;
+                    components.borrow().filter(&op, &component).map_err(fail)
                 })?,
             )?;
             if first {
