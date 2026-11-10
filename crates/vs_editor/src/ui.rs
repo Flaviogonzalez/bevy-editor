@@ -41,21 +41,21 @@ pub(crate) fn icon_button(id: &'static str, icon: IconName, tooltip: &'static st
         .on_click(move |_, window, cx| window.dispatch_action(boxed.boxed_clone(), cx))
 }
 
-pub(crate) fn code_block(code: &str, comment: &'static str, cx: &App) -> Div {
-    div()
-        .p_2()
-        .rounded_md()
-        .bg(theme::field_bg(cx))
-        .font_family(MONO)
-        .text_size(px(11.5))
-        .children(code.lines().map(|line| {
+/// One element per line of `code`, comments dimmed, and the lines in `marked` (0-based ranges)
+/// highlighted. Kept as separate elements so a scroll handle can bring a line into view.
+pub(crate) fn code_lines(code: &str, comment: &'static str, marked: &[std::ops::Range<usize>], cx: &App) -> Vec<Div> {
+    code.lines()
+        .enumerate()
+        .map(|(i, line)| {
             let color = if line.trim_start().starts_with(comment) { theme::dim(cx) } else { theme::text(cx) };
-            div().text_color(color).child(if line.is_empty() {
-                " ".to_string()
-            } else {
-                line.replace('\t', "    ")
-            })
-        }))
+            let lit = marked.iter().any(|r| r.contains(&i));
+            div()
+                .px_2()
+                .text_color(color)
+                .when(lit, |d| d.bg(theme::selection(cx).opacity(0.18)))
+                .child(if line.is_empty() { " ".to_string() } else { line.replace('\t', "    ") })
+        })
+        .collect()
 }
 
 /// A side panel: a scrolling column on the panel background, filling the resizable slot it

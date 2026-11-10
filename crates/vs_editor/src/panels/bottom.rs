@@ -16,7 +16,7 @@ use crate::editor::Editor;
 use crate::panels::{BottomTab, CodeView};
 use crate::workspace::tasks::Outcome;
 use crate::theme;
-use crate::ui::{MONO, code_block, icon_button};
+use crate::ui::{MONO, code_lines, icon_button};
 
 impl Editor {
     /// The panel under the canvas: what the editor tells you back. The compiler's problems, the
@@ -62,26 +62,54 @@ impl Editor {
                     })
                     .child(icon_button("panel-hide", IconName::Close, "Hide panel", &actions::ToggleBottomPanel)),
             );
-        let body = match self.chrome.bottom_tab {
-            BottomTab::Problems => self.problems_list(compiled, cx).into_any_element(),
-            BottomTab::Output => self.output_log(cx).into_any_element(),
-            BottomTab::Code => {
-                let code = match self.chrome.code_view {
-                    CodeView::Lua => compiled.lua.clone(),
-                    CodeView::Rust => self.rust_code(compiled),
-                };
-                code_block(&code, if self.chrome.code_view == CodeView::Lua { "--" } else { "//" }, cx).into_any_element()
-            }
-        };
-        div()
+        let panel = div()
             .size_full()
             .flex()
             .flex_col()
             .bg(theme::panel_bg(cx))
             .border_t_1()
             .border_color(theme::border(cx))
-            .child(tabs)
-            .child(div().id("bottom-body").flex_1().min_h_0().overflow_y_scroll().p_2().child(body))
+            .child(tabs);
+        let body = div().id("bottom-body").flex_1().min_h_0().overflow_y_scroll().p_2();
+        match self.chrome.bottom_tab {
+            BottomTab::Problems => panel.child(body.child(self.problems_list(compiled, cx))),
+            BottomTab::Output => panel.child(body.child(self.output_log(cx))),
+            BottomTab::Code => {
+                let (code, comment, marked) = match self.chrome.code_view {
+                    CodeView::Lua => (compiled.lua.clone(), "--", Vec::new()),
+                    CodeView::Rust => {
+                        let traced = self.rust_code(compiled);
+                        let marked = self.marked_lines(&traced);
+                        (traced.code, "//", marked)
+                    }
+                };
+                // The lines are the scrolling element's own children, so the scroll handle can
+                // bring the first marked one into view.
+                let lines = code_lines(&code, comment, &marked, cx);
+                panel.child(
+                    body.track_scroll(&self.chrome.code_scroll)
+                        .bg(theme::field_bg(cx))
+                        .font_family(MONO)
+                        .text_size(px(11.5))
+                        .children(lines),
+                )
+            }
+        }
+    }
+
+    /// The lines of `traced` the selected nodes wrote. When the selection has changed since the
+    /// last time, it also scrolls the code to the first of them, a couple of lines below the top.
+    fn marked_lines(&self, traced: &vs_graph::rust::Traced) -> Vec<std::ops::Range<usize>> {
+        let marked: Vec<std::ops::Range<usize>> =
+            self.doc.selected.iter().filter_map(|id| traced.lines.get(id)).flatten().cloned().collect();
+        let mut last = self.chrome.code_scrolled_for.borrow_mut();
+        if *last != self.doc.selected {
+            *last = self.doc.selected.clone();
+            if let Some(first) = marked.iter().map(|r| r.start).min() {
+                self.chrome.code_scroll.scroll_to_top_of_item(first.saturating_sub(2));
+            }
+        }
+        marked
     }
 
     fn problems_list(&self, compiled: &Compiled, cx: &mut Context<Self>) -> Div {
@@ -148,17 +176,16 @@ impl Editor {
             })))
     }
 
-    /// The file `Build` writes for this script.
-    fn rust_code(&self, compiled: &Compiled) -> String {
+    /// The file `Build` writes for this script, with the lines each node wrote.
+    fn rust_code(&self, compiled: &Compiled) -> vs_graph::rust::Traced {
         if compiled.errors() > 0 {
-            return "// Fix the errors to see the Rust code.".into();
+            return vs_graph::rust::Traced { code: "// Fix the errors to see the Rust code.".into(), ..Default::default() };
         }
         let stem = self
             .doc.path
             .as_ref()
             .and_then(|p| p.file_stem())
             .map_or("script".into(), |s| s.to_string_lossy().into_owned());
-        let files = vs_graph::rust::emit_export(&[vs_graph::rust::Script { path: stem, ir: &compiled.module }]);
-        files.into_iter().find(|(name, _)| name != "scripts/mod.rs").map(|(_, code)| code).unwrap_or_default()
+        vs_graph::rust::emit_script_traced(&vs_graph::rust::Script { path: stem, ir: &compiled.module })
     }
 }
