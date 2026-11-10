@@ -9,6 +9,7 @@ mod bottom;
 mod dialog;
 mod explorer;
 mod inspector;
+mod query;
 mod tabs;
 mod toolbar;
 
@@ -21,6 +22,8 @@ pub enum Dialog {
     NewScript { buffer: String, folder: String },
     /// A folder in `parent`.
     NewFolder { buffer: String, parent: String },
+    /// The query commandbox of an event node; `ran` once its Query button was pressed.
+    Query { node: vs_graph::NodeId, ran: bool },
 }
 
 /// The tabs of the panel under the canvas.
@@ -50,6 +53,12 @@ pub struct Chrome {
     pub dialog: Option<Dialog>,
     /// The Explorer's folded folders, by path in the scripts folder (`player/input`).
     pub collapsed: std::collections::BTreeSet<String>,
+    /// The Code tab's scroll position. Selecting a node scrolls the Rust code to the lines it
+    /// writes.
+    pub code_scroll: gpui_kit::ScrollHandle,
+    /// The selection the Code tab last scrolled for. It scrolls once when the selection
+    /// changes, then leaves the scrolling to the user. Written while rendering, hence the cell.
+    pub code_scrolled_for: std::cell::RefCell<std::collections::BTreeSet<vs_graph::NodeId>>,
 }
 
 impl Default for Chrome {
@@ -61,6 +70,8 @@ impl Default for Chrome {
             status: String::new(),
             dialog: None,
             collapsed: Default::default(),
+            code_scroll: gpui_kit::ScrollHandle::new(),
+            code_scrolled_for: Default::default(),
         }
     }
 }

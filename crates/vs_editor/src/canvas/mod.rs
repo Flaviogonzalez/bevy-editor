@@ -2,6 +2,7 @@
 //! wheel handlers that drive them.
 //!
 //! - `layout`: node geometry in graph units and hit testing, shared by drawing and input.
+//! - `groups`: the script's systems as frames around the nodes that make them up.
 //! - `input`: the mouse handlers (press, move, release) and the drags they drive.
 //! - `node`: one node drawn as a card, with its pins and inline fields.
 //! - `add_menu`: the searchable menu that adds a node.
@@ -30,6 +31,7 @@ use crate::theme;
 use paint::paint_scene;
 
 mod add_menu;
+mod groups;
 mod input;
 pub mod layout;
 mod node;
@@ -144,7 +146,11 @@ impl Editor {
             move |bounds, _, window, _| {
                 let origin = V2::new(bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
                 let extent = V2::new(bounds.size.width.as_f32(), bounds.size.height.as_f32());
-                cell.set((origin, extent));
+                // The nodes of this frame were picked for the size the canvas had before (see
+                // `visible`): when it changed (the first frame, a resize), draw again.
+                if cell.replace((origin, extent)).1 != extent {
+                    window.refresh();
+                }
                 paint_scene(&scene, bounds, window);
             },
         )
@@ -219,11 +225,25 @@ impl Editor {
             }))
             .child(painter);
 
-        let systems = self.systems(compiled);
-        for l in layouts {
+        let names = vs_graph::rust::names(&self.doc.file_name());
+        let systems = vs_graph::access::systems(&compiled.module, &names);
+        let groups = groups::groups(&compiled.module.blocks, systems, layouts);
+        let view = self.visible();
+        // The frames go under the nodes.
+        for group in groups.iter().filter(|g| g.rect.intersects(&view)) {
+            area = area.child(self.group_element(group, cx));
+        }
+        let stripes: BTreeMap<NodeId, Hsla> =
+            groups.iter().flat_map(|g| g.members.iter().map(|id| (*id, g.color()))).collect();
+        let entries: BTreeMap<NodeId, &groups::Group> = groups.iter().map(|g| (g.event, g)).collect();
+        // Only the nodes in view become elements. Each node is a few dozen elements that GPUI
+        // lays out and paints every frame, so with hundreds of nodes the ones off screen were
+        // most of the cost of panning. Wires are painted apart, so they still show.
+        for l in layouts.iter().filter(|l| l.rect.intersects(&view)) {
             if let Some(node) = self.doc.graph.node(l.id) {
-                let system = systems.get(&l.id);
-                area = area.child(self.node_element(node, l, flagged.get(&l.id).copied(), system, cx));
+                let stripe = stripes.get(&l.id).copied();
+                let entry = entries.get(&l.id).copied();
+                area = area.child(self.node_element(node, l, flagged.get(&l.id).copied(), stripe, entry, cx));
             }
         }
         if self.doc.graph.nodes.is_empty() && self.canvas.menu.is_none() {
@@ -233,6 +253,12 @@ impl Editor {
             area = area.child(self.menu_element(cx));
         }
         area
+    }
+
+    /// The part of the graph the canvas shows, in graph units, as of the last paint.
+    fn visible(&self) -> Rect {
+        let size = self.canvas.size();
+        Rect::from_points(self.doc.to_graph(V2::default()), self.doc.to_graph(size))
     }
 
     /// What the canvas shows while the graph has no nodes: what to do next, instead of a blank grid.

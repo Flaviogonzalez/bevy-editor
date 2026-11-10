@@ -18,8 +18,12 @@ pub(crate) fn folder_plugin(folder: &str) -> String {
 }
 
 impl Editor {
-    pub(crate) fn dialog_element(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn dialog_element(&self, compiled: &vs_graph::Compiled, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let dialog = self.chrome.dialog.as_ref().expect("checked by the caller");
+        // The query commandbox has a layout of its own (see `query`).
+        if let Dialog::Query { node, ran } = dialog {
+            return self.query_command(*node, *ran, compiled, cx);
+        }
         let body = match dialog {
             Dialog::Settings => div()
                 .flex()
@@ -47,6 +51,7 @@ impl Editor {
                         .text_color(theme::dim(cx))
                         .child(format!("Saved in {}", vs_project::Config::path().display())),
                 ),
+            Dialog::Query { .. } => unreachable!("drawn above"),
             Dialog::NewProject { buffer } | Dialog::NewScript { buffer, .. } | Dialog::NewFolder { buffer, .. } => {
                 let (title, hint) = match dialog {
                     Dialog::NewProject { .. } => (
@@ -128,6 +133,7 @@ impl Editor {
                             ))),
                     ),
             )
+            .into_any_element()
     }
 }
 
@@ -235,6 +241,8 @@ impl Editor {
                     }
                 }
             }
+            // Enter runs the query, like its big button.
+            Some(Dialog::Query { node, .. }) => self.chrome.dialog = Some(Dialog::Query { node, ran: true }),
             Some(Dialog::Settings) | None => {}
         }
     }

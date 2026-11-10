@@ -149,6 +149,56 @@ pub struct Node {
     /// fields are in sight. The copy holds only the name; the fields come from the catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_of: Option<String>,
+    /// The filters an event's system adds to its query, besides the one on the script's own
+    /// component, which is always there (`With` it, or `Added` it for a Start event).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<QueryFilter>,
+}
+
+/// One filter of a system's query, such as `Without<Enemy>`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryFilter {
+    pub op: FilterOp,
+    /// The component's short name, such as `Enemy` or `PointLight`.
+    pub component: String,
+}
+
+/// Bevy's query filters on one component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterOp {
+    /// Entities that have it.
+    With,
+    /// Entities that don't have it.
+    Without,
+    /// Entities that got it since the system last ran.
+    Added,
+    /// Entities whose component was added or changed since the system last ran.
+    Changed,
+}
+
+impl FilterOp {
+    pub const ALL: [FilterOp; 4] = [FilterOp::With, FilterOp::Without, FilterOp::Added, FilterOp::Changed];
+
+    /// The Bevy type: `With`, `Without`, `Added`, `Changed`.
+    pub fn rust(self) -> &'static str {
+        match self {
+            FilterOp::With => "With",
+            FilterOp::Without => "Without",
+            FilterOp::Added => "Added",
+            FilterOp::Changed => "Changed",
+        }
+    }
+
+    /// The name the Lua runtime uses.
+    pub fn lua(self) -> &'static str {
+        match self {
+            FilterOp::With => "with",
+            FilterOp::Without => "without",
+            FilterOp::Added => "added",
+            FilterOp::Changed => "changed",
+        }
+    }
 }
 
 /// A component declared in a script: data only, a name and typed fields with their starting
@@ -244,7 +294,7 @@ impl Graph {
         let id = self.next_id;
         self.next_id += 1;
         let mut node =
-            Node { id, kind: kind.to_string(), x, y, values: BTreeMap::new(), var, field: None, name: None, component: None, copy_of: None };
+            Node { id, kind: kind.to_string(), x, y, values: BTreeMap::new(), var, field: None, name: None, component: None, copy_of: None, filters: Vec::new() };
         let pins = self.pins_of(&node);
         for pin in pins.inputs {
             if let Some(value) = pin.default.clone().or_else(|| Value::default_for(pin.ty)) {
@@ -270,6 +320,7 @@ impl Graph {
             name: None,
             component: None,
             copy_of: None,
+            filters: Vec::new(),
         };
         for pin in self.pins_of(&node).inputs {
             if let Some(value) = pin.default.clone().or_else(|| Value::default_for(pin.ty)) {

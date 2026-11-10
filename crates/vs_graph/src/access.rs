@@ -11,6 +11,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::FilterOp;
 use crate::ir::{Action, Device, EffectOp, Event, Intrinsic, Module, Operand, Step};
 use crate::lower::snake_case;
 use crate::rust::{Names, Namer};
@@ -39,7 +40,7 @@ pub struct Item {
     pub write: bool,
 }
 
-/// The query's filter, always on the script's own component.
+/// The query's filter on the script's own component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter {
     /// Only entities that got the component since the system last ran: a Start event. Bevy
@@ -80,6 +81,8 @@ pub struct System {
     /// The query's data, in the order the generated code asks for it.
     pub items: Vec<Item>,
     pub filter: Option<Filter>,
+    /// The filters the event node adds, after the one on the own component.
+    pub filters: Vec<crate::ir::Filter>,
     /// Resources it reads. None are written.
     pub resources: BTreeSet<Resource>,
     pub commands: bool,
@@ -93,6 +96,14 @@ impl System {
 
     /// The query as a Rust type with short names: `Query<(&mut Transform, &Spinner)>`.
     pub fn query(&self) -> String {
+        match self.filter_type() {
+            Some(filters) => format!("Query<{}, {filters}>", self.data()),
+            None => format!("Query<{}>", self.data()),
+        }
+    }
+
+    /// The query's data, its first type parameter: `(&mut Transform, &Spinner)`.
+    pub fn data(&self) -> String {
         let items: Vec<String> = self
             .items
             .iter()
@@ -102,16 +113,54 @@ impl System {
                 (_, false) => format!("&{}", i.name),
             })
             .collect();
-        let data = match items.len() {
+        match items.len() {
             0 => "()".to_string(),
             1 => items[0].clone(),
             _ => format!("({})", items.join(", ")),
-        };
-        match self.filter {
-            Some(Filter::Added) => format!("Query<{data}, Added<{}>>", self.own),
-            Some(Filter::With) => format!("Query<{data}, With<{}>>", self.own),
-            None => format!("Query<{data}>"),
         }
+    }
+
+    /// The query's filters, its second type parameter, if it has any: `With<Spinner>`, or
+    /// `(With<Spinner>, Without<Enemy>)`.
+    pub fn filter_type(&self) -> Option<String> {
+        let filters = self.filter_names();
+        match filters.len() {
+            0 => None,
+            1 => Some(filters[0].clone()),
+            _ => Some(format!("({})", filters.join(", "))),
+        }
+    }
+
+    /// The query's filters with short names, the own component's first: `With<Spinner>`,
+    /// `Without<Enemy>`.
+    pub fn filter_names(&self) -> Vec<String> {
+        let own = match self.filter {
+            Some(Filter::Added) => Some(format!("Added<{}>", self.own)),
+            Some(Filter::With) => Some(format!("With<{}>", self.own)),
+            None => None,
+        };
+        own.into_iter().chain(self.filters.iter().map(|f| format!("{}<{}>", f.op.rust(), f.component.name))).collect()
+    }
+
+    /// The components every entity it matches has: the ones it asks for, and the ones a `With`,
+    /// `Added` or `Changed` filter is on. Bevy's `FilteredAccess` keeps the same set.
+    fn requires(&self) -> BTreeSet<&str> {
+        let mut out: BTreeSet<&str> =
+            self.items.iter().filter(|i| i.subject != Subject::Entity).map(|i| i.name.as_str()).collect();
+        if self.filter.is_some() {
+            out.insert(&self.own);
+        }
+        out.extend(self.filters.iter().filter(|f| f.op != FilterOp::Without).map(|f| f.component.name.as_str()));
+        out
+    }
+
+    /// Whether no entity can match both: one has `Without<T>` and the other requires `T`.
+    pub fn disjoint(&self, other: &System) -> bool {
+        let excludes = |a: &System, b: &System| {
+            let required = b.requires();
+            a.filters.iter().any(|f| f.op == FilterOp::Without && required.contains(f.component.name.as_str()))
+        };
+        excludes(self, other) || excludes(other, self)
     }
 
     /// Its parameters' types, in the order the generated function takes them: the resources,
@@ -125,7 +174,8 @@ impl System {
         params
     }
 
-    /// The components it reads but doesn't write, by short name. `Added<T>` reads `T`.
+    /// The components it reads but doesn't write, by short name. `Added<T>` and `Changed<T>`
+    /// read `T`.
     pub fn reads(&self) -> BTreeSet<&str> {
         let mut reads: BTreeSet<&str> = self
             .items
@@ -136,6 +186,12 @@ impl System {
         if self.filter == Some(Filter::Added) {
             reads.insert(&self.own);
         }
+        reads.extend(
+            self.filters
+                .iter()
+                .filter(|f| matches!(f.op, FilterOp::Added | FilterOp::Changed))
+                .map(|f| f.component.name.as_str()),
+        );
         let writes = self.writes();
         reads.retain(|r| !writes.contains(r));
         reads
@@ -170,9 +226,9 @@ pub struct Ambiguity {
 ///
 /// This is Bevy's rule (`Systems::get_conflicting_systems`) for what these systems can ask for.
 /// A script's plugin chains its systems, so only systems of different scripts are unordered.
-/// Two unordered systems conflict on a component one writes and the other reads or writes; the
-/// `With` filter isn't an access, and the systems never filter with `Without`, so no two queries
-/// are known to match different entities. Resources aren't compared, since every one these
+/// Two unordered systems conflict on a component one writes and the other reads or writes,
+/// unless a `Without` keeps their queries from matching the same entity; `With` and `Without`
+/// aren't accesses. Resources aren't compared, since every one these
 /// systems take is read-only, and `Commands` only queues changes for later.
 ///
 /// Only scripts are seen: the game's own systems in `Update` can be ambiguous with them too.
@@ -197,8 +253,12 @@ pub fn ambiguities(scripts: &[Vec<System>]) -> Vec<Ambiguity> {
     out
 }
 
-/// The components two systems conflict on: one writes it, the other reads or writes it.
+/// The components two systems conflict on: one writes it, the other reads or writes it, and
+/// their queries can match the same entity.
 pub fn conflicts(a: &System, b: &System) -> Vec<String> {
+    if a.disjoint(b) {
+        return Vec::new();
+    }
     let (wa, wb) = (a.writes(), b.writes());
     let (ra, rb) = (a.reads(), b.reads());
     let mut out: BTreeSet<&str> = wa.intersection(&wb).copied().collect();
@@ -227,12 +287,12 @@ pub fn systems(ir: &Module, names: &Names) -> Vec<System> {
             };
             let name = functions.take(block.name.as_deref().unwrap_or(&default));
             let u = usage(&block.body, transform);
-            system(ir, names, name, index, block.event == Event::Start, &u)
+            system(ir, names, name, index, block.event == Event::Start, &u, &block.filters)
         })
         .collect()
 }
 
-fn system(ir: &Module, names: &Names, name: String, block: usize, start: bool, u: &Usage) -> System {
+fn system(ir: &Module, names: &Names, name: String, block: usize, start: bool, u: &Usage, filters: &[crate::ir::Filter]) -> System {
     let item = |subject, name: &str, rust_path: &str, write| Item {
         subject,
         name: name.to_string(),
@@ -261,7 +321,15 @@ fn system(ir: &Module, names: &Names, name: String, block: usize, start: bool, u
         (false, false) => Some(Filter::With),
         (false, true) => None,
     };
-    System { name, block, own: names.ty.clone(), items, filter, resources: u.resources.clone(), commands: u.despawn }
+    let filters = filters.to_vec();
+    System { name, block, own: names.ty.clone(), items, filter, filters, resources: u.resources.clone(), commands: u.despawn }
+}
+
+/// Whether an event's steps read or write its entity's `Transform`, so its query asks for it.
+/// `transform` is the index of `Transform` in `Module::components`, if a node uses its fields.
+pub fn uses_transform(steps: &[Step], transform: Option<usize>) -> bool {
+    let u = usage(steps, transform);
+    u.transform_read || u.transform_write
 }
 
 /// What an event's steps touch.
@@ -388,6 +456,55 @@ mod tests {
         assert!(ambiguities(&[scripts.concat()]).is_empty());
         // Two readers of `Transform` don't conflict.
         assert!(ambiguities(&[scripts[1].clone(), scripts[1].clone()]).is_empty());
+    }
+
+    /// The starter's spinner with filters on its Update event.
+    fn filtered(filters: &[(crate::FilterOp, &str)]) -> crate::Lowered {
+        let mut graph = crate::starter();
+        let update = graph.nodes.iter_mut().find(|n| n.kind == "event.update").unwrap();
+        update.filters =
+            filters.iter().map(|(op, c)| crate::QueryFilter { op: *op, component: c.to_string() }).collect();
+        crate::lower(&graph)
+    }
+
+    #[test]
+    fn event_filters_follow_the_own_components_in_the_query() {
+        use crate::FilterOp::*;
+        let lowered = filtered(&[(Without, "PointLight"), (Changed, "SpotLight")]);
+        assert!(lowered.problems.is_empty(), "{:?}", lowered.problems);
+        let s = &systems(&lowered.module, &names("scripts/spinner.lua"))[0];
+        assert_eq!(s.query(), "Query<(&mut Transform, &Spinner), (Without<PointLight>, Changed<SpotLight>)>");
+        // `Changed<T>` reads `T`; `Without<T>` touches nothing.
+        assert_eq!(s.reads(), BTreeSet::from(["Spinner", "SpotLight"]));
+
+        let rust = crate::rust::emit_script_traced(&crate::rust::Script { path: "scripts/spinner.lua".into(), ir: &lowered.module }).code;
+        let flat: String = rust.split_whitespace().collect::<Vec<_>>().join(" ").replace("< ", "<").replace(", >", ">");
+        assert!(flat.contains("Query<(&mut Transform, &Spinner), (Without<PointLight>, Changed<SpotLight>)>"), "{rust}");
+        let lua = crate::lua::emit(&lowered.module);
+        assert!(lua.contains(r#"if vs.filter(entity, "without", "PointLight") and vs.filter(entity, "changed", "SpotLight") then"#), "{lua}");
+    }
+
+    #[test]
+    fn a_filter_that_never_matches_or_names_no_component_is_an_error() {
+        use crate::FilterOp::*;
+        let lowered = filtered(&[(Without, "Transform"), (With, "Nope")]);
+        let messages: Vec<&str> = lowered.problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("Unknown component `Nope`")), "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("`Without<Transform>` never matches")), "{messages:?}");
+    }
+
+    #[test]
+    fn a_without_keeps_two_systems_from_conflicting() {
+        use crate::FilterOp::*;
+        let mut scripts = two_scripts();
+        assert_eq!(ambiguities(&scripts).len(), 1);
+        // The door's Start reads `Transform` of entities with `Door`; the spinner skips those.
+        let spinner = filtered(&[(Without, "SpotLight")]).module;
+        let mut s = systems(&spinner, &names("scripts/spinner.lua"));
+        s[0].filters[0].component.name = "Door".into();
+        scripts[0] = s;
+        assert!(ambiguities(&scripts).is_empty());
     }
 
     #[test]

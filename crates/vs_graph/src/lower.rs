@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::components;
 use crate::graph::{Graph, Node, NodeId, PinRef, Side, Value};
-use crate::ir::{Action, Axis, Block, ComponentUse, Declared, Device, EffectOp, Event, Intrinsic, Let, Lit, Module, Operand, Press, Step, Variable};
+use crate::ir::{Action, Axis, Block, ComponentUse, Declared, Device, EffectOp, Event, Filter, Intrinsic, Let, Lit, Module, Operand, Press, Step, Variable};
 use crate::library::{self, PinType};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +40,8 @@ pub fn lower(graph: &Graph) -> Lowered {
         graph,
         problems: Vec::new(),
         reached: BTreeSet::new(),
+        visited: BTreeSet::new(),
+        step_nodes: Vec::new(),
         states: BTreeMap::new(),
         state_names: Vec::new(),
         next_local: 0,
@@ -101,9 +103,27 @@ pub fn lower(graph: &Graph) -> Lowered {
             _ => continue,
         };
         l.reached.insert(node.id);
+        l.visited.insert(node.id);
         let mut body = Vec::new();
         l.chain(&PinRef::new(node.id, "then"), &mut body, &mut Vec::new());
-        blocks.push(Block { comment: label(node), node: node.id, name: node.name.clone(), event, body });
+        let nodes = std::mem::take(&mut l.visited);
+        let filters = l.filters(node);
+        blocks.push(Block { comment: label(node), node: node.id, nodes, name: node.name.clone(), event, filters, body });
+    }
+
+    // A `Without` on a component the entity always has never matches. The script's own component
+    // requires every component it uses, and a system that moves its entity asks for `Transform`.
+    for block in &blocks {
+        let transform = l.components.iter().position(|c| c.name == "Transform");
+        let moves = crate::access::uses_transform(&block.body, transform);
+        for f in block.filters.iter().filter(|f| f.op == crate::FilterOp::Without) {
+            let name = &f.component.name;
+            if l.components.iter().any(|c| c.name == *name) {
+                l.error(block.node, format!("`Without<{name}>` never matches: the script uses {name}, so its entities always have it"));
+            } else if name == "Transform" && moves {
+                l.error(block.node, "`Without<Transform>` never matches: this system moves its entity, so it asks for Transform".into());
+            }
+        }
     }
 
     for node in &graph.nodes {
@@ -185,6 +205,12 @@ struct Lowerer<'a> {
     problems: Vec<Problem>,
     /// Nodes reached from an event, to warn about the ones that never run.
     reached: BTreeSet<NodeId>,
+    /// Nodes the event being lowered has gone through so far, statements and data nodes alike.
+    /// It becomes that event's [`Block::nodes`] and starts empty for the next one.
+    visited: BTreeSet<NodeId>,
+    /// The data nodes the statement being lowered has read so far, in order. It becomes that
+    /// statement's [`Step::nodes`], after the statement itself.
+    step_nodes: Vec<NodeId>,
     /// State slot of each Flip Flop / Do Once node.
     states: BTreeMap<NodeId, usize>,
     state_names: Vec<String>,
@@ -228,6 +254,26 @@ impl Lowerer<'_> {
         Some((index, field.path, field.ty))
     }
 
+    /// An event node's query filters, each component resolved the way Get / Set Component nodes
+    /// resolve theirs: the ones this script declares first, then the catalog.
+    fn filters(&mut self, node: &Node) -> Vec<Filter> {
+        let mut out = Vec::new();
+        for f in &node.filters {
+            let found = match self.graph.defined_components().find(|d| d.name == f.component) {
+                Some(def) => Some(components::declared_info(def)),
+                None => components::find(&f.component),
+            };
+            match found {
+                Some(c) => out.push(Filter { op: f.op, component: ComponentUse { name: c.name, rust_path: c.rust_path } }),
+                None => self.error(
+                    node.id,
+                    format!("Unknown component `{}` in the query. If it's the game's own, run the preview once so the editor learns it", f.component),
+                ),
+            }
+        }
+        out
+    }
+
     /// Checks a Define Component node: the component needs a type name that nothing else uses,
     /// and its fields need distinct snake_case names, since the preview reaches them by those
     /// names through reflection. `None` when it has errors.
@@ -266,7 +312,7 @@ impl Lowerer<'_> {
             }
         }
         let fields = def.fields.iter().map(|f| Variable { name: f.name.clone(), initial: lit_of(&f.value) }).collect();
-        ok.then(|| Declared { name: name.clone(), fields })
+        ok.then(|| Declared { node: node.id, name: name.clone(), fields })
     }
 
     fn var(&self, node: &Node) -> Option<usize> {
@@ -327,6 +373,7 @@ impl Lowerer<'_> {
             }
             stack.push(node.id);
             self.reached.insert(node.id);
+            self.visited.insert(node.id);
             match self.statement(node, out, stack) {
                 Some(next) => from = next,
                 None => break,
@@ -336,7 +383,28 @@ impl Lowerer<'_> {
     }
 
     /// Lowers one statement into `out`. Returns the exec output the run continues from, if any.
+    ///
+    /// The data nodes its inputs read are collected apart from the statement around it (a
+    /// Branch's, say), so each step lists only its own: see [`Step::nodes`].
     fn statement(&mut self, node: &Node, out: &mut Vec<Step>, stack: &mut Vec<NodeId>) -> Option<PinRef> {
+        let outer = std::mem::take(&mut self.step_nodes);
+        let next = self.statement_steps(node, out, stack);
+        self.step_nodes = outer;
+        next
+    }
+
+    /// The statement node `id`, then the data nodes read so far by the statement being lowered.
+    fn used(&self, id: NodeId) -> Vec<NodeId> {
+        let mut nodes = vec![id];
+        for n in &self.step_nodes {
+            if !nodes.contains(n) {
+                nodes.push(*n);
+            }
+        }
+        nodes
+    }
+
+    fn statement_steps(&mut self, node: &Node, out: &mut Vec<Step>, stack: &mut Vec<NodeId>) -> Option<PinRef> {
         let id = node.id;
         let comment = label(node);
         let mut lets = Vec::new();
@@ -348,7 +416,7 @@ impl Lowerer<'_> {
                 let mut otherwise = Vec::new();
                 self.chain(&PinRef::new(id, "true"), &mut then, stack);
                 self.chain(&PinRef::new(id, "false"), &mut otherwise, stack);
-                out.push(Step { comment, lets, action: Action::If { cond, then, otherwise } });
+                out.push(Step { comment, nodes: self.used(id), lets, action: Action::If { cond, then, otherwise } });
                 return None;
             }
             "flow.sequence" => {
@@ -359,13 +427,14 @@ impl Lowerer<'_> {
                 // state = not state; if state then a else b
                 let slot = self.state(node);
                 let flipped = self.call("logic.not", vec![Operand::State(slot)], &mut lets);
-                out.push(Step { comment, lets, action: Action::SetState { slot, value: flipped } });
+                out.push(Step { comment, nodes: vec![id], lets, action: Action::SetState { slot, value: flipped } });
                 let mut then = Vec::new();
                 let mut otherwise = Vec::new();
                 self.chain(&PinRef::new(id, "a"), &mut then, stack);
                 self.chain(&PinRef::new(id, "b"), &mut otherwise, stack);
                 let cond = Operand::State(slot);
-                out.push(Step { comment: String::new(), lets: Vec::new(), action: Action::If { cond, then, otherwise } });
+                let action = Action::If { cond, then, otherwise };
+                out.push(Step { comment: String::new(), nodes: vec![id], lets: Vec::new(), action });
                 return None;
             }
             "flow.do_once" => {
@@ -373,9 +442,9 @@ impl Lowerer<'_> {
                 let slot = self.state(node);
                 let cond = self.call("logic.not", vec![Operand::State(slot)], &mut lets);
                 let set = Action::SetState { slot, value: Operand::Lit(Lit::Bool(true)) };
-                let mut then = vec![Step { comment: String::new(), lets: Vec::new(), action: set }];
+                let mut then = vec![Step { comment: String::new(), nodes: vec![id], lets: Vec::new(), action: set }];
                 self.chain(&PinRef::new(id, "then"), &mut then, stack);
-                out.push(Step { comment, lets, action: Action::If { cond, then, otherwise: Vec::new() } });
+                out.push(Step { comment, nodes: vec![id], lets, action: Action::If { cond, then, otherwise: Vec::new() } });
                 return None;
             }
             "entity.despawn" => Action::Despawn,
@@ -414,7 +483,7 @@ impl Lowerer<'_> {
                 return None;
             }
         };
-        out.push(Step { comment, lets, action });
+        out.push(Step { comment, nodes: self.used(id), lets, action });
         Some(PinRef::new(id, "then"))
     }
 
@@ -471,6 +540,8 @@ impl Lowerer<'_> {
             return op.clone();
         }
         let Some(node) = self.graph.node(pin.node) else { return Operand::Lit(Lit::Number(0.0)) };
+        self.visited.insert(node.id);
+        self.step_nodes.push(node.id);
         if stack.contains(&node.id) {
             self.error(node.id, "Data wires form a loop".into());
             return Operand::Lit(Lit::Number(0.0));

@@ -15,7 +15,7 @@ pub mod tabs;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use vs_graph::{Graph, NodeId, Value, Variable};
+use vs_graph::{FilterOp, Graph, NodeId, QueryFilter, Value, Variable};
 
 use crate::canvas::layout::{self, NodeLayout, V2};
 use history::History;
@@ -243,6 +243,37 @@ impl Document {
             }
         }
         self.graph.prune_links();
+    }
+
+    // Query filters ----------------------------------------------------------------------------
+
+    /// Adds `With<component>` to event `node`'s query.
+    pub fn add_filter(&mut self, node: NodeId, component: &str) {
+        if self.graph.node(node).is_none() {
+            return;
+        }
+        self.checkpoint();
+        let filter = QueryFilter { op: FilterOp::With, component: component.to_string() };
+        self.graph.node_mut(node).expect("checked above").filters.push(filter);
+    }
+
+    /// Changes filter `i` of event `node`: its operation, its component, or both.
+    pub fn set_filter(&mut self, node: NodeId, i: usize, op: Option<FilterOp>, component: Option<&str>) {
+        let Some(old) = self.graph.node(node).and_then(|n| n.filters.get(i)).cloned() else { return };
+        let new = QueryFilter { op: op.unwrap_or(old.op), component: component.map_or(old.component.clone(), str::to_string) };
+        if new == old {
+            return;
+        }
+        self.checkpoint();
+        self.graph.node_mut(node).expect("checked above").filters[i] = new;
+    }
+
+    pub fn remove_filter(&mut self, node: NodeId, i: usize) {
+        if self.graph.node(node).is_none_or(|n| i >= n.filters.len()) {
+            return;
+        }
+        self.checkpoint();
+        self.graph.node_mut(node).expect("checked above").filters.remove(i);
     }
 
     /// Adds a Get or Set node (`kind`) for variable `i` at `at`, in graph units, and selects it.

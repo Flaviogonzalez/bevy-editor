@@ -111,6 +111,28 @@ pub fn set(
     if write(field, value) { Ok(()) } else { Err(format!("{name}.{path} has another type")) }
 }
 
+/// Whether an entity passes one query filter (`with`, `without`, `added` or `changed`) on the
+/// component scripts call `name`, as a compiled system's query would decide it. `Added` and
+/// `Changed` count from the last time the running exclusive system ran: inside one,
+/// `World::last_change_tick` is that system's last run.
+pub fn filter(world: &World, registry: &TypeRegistry, declared: &Declared, entity: Entity, op: &str, name: &str) -> Result<bool, String> {
+    let (reg, _) = registration(registry, declared, name)?;
+    let entity_ref = world.get_entity(entity).map_err(|e| e.to_string())?;
+    let Some(id) = world.components().get_id(reg.type_id()) else {
+        // No entity has ever had it, so this one has it neither.
+        return if op == "without" { Ok(true) } else if ["with", "added", "changed"].contains(&op) { Ok(false) } else { Err(format!("unknown query filter {op}")) };
+    };
+    let ticks = entity_ref.get_change_ticks_by_id(id);
+    let (last_run, this_run) = (world.last_change_tick(), world.read_change_tick());
+    match op {
+        "with" => Ok(ticks.is_some()),
+        "without" => Ok(ticks.is_none()),
+        "added" => Ok(ticks.is_some_and(|t| t.is_added(last_run, this_run))),
+        "changed" => Ok(ticks.is_some_and(|t| t.is_changed(last_run, this_run))),
+        _ => Err(format!("unknown query filter {op}")),
+    }
+}
+
 /// A component as the editor's catalog lists it.
 #[derive(Clone, Debug, Serialize)]
 pub struct Described {
@@ -247,6 +269,39 @@ mod tests {
         assert_eq!(get(&world, &r, &none, e, "Shadow", "offset.x").unwrap(), Arg::Number(2.5));
         assert_eq!(kind(&r, &none, "Shadow", "color").unwrap(), PinKind::Color);
         assert!(set(&mut world, &r, &none, e, "Shadow", "color", Arg::Number(1.0)).is_err());
+    }
+
+    /// `added` and `changed` count from the world's last change tick, which an exclusive system
+    /// sets to its own last run.
+    #[test]
+    fn filters_check_presence_and_change_ticks() {
+        let mut world = World::new();
+        let registry = AppTypeRegistry::default();
+        registry.write().register::<Label>();
+        registry.write().register::<Shadow>();
+        let none = Declared::default();
+        let with = world.spawn(Label("a".into())).id();
+        let without = world.spawn_empty().id();
+        let r = registry.read();
+        let check = |world: &World, e, op| filter(world, &r, &none, e, op, "Label").unwrap();
+
+        assert!(check(&world, with, "with") && !check(&world, with, "without"));
+        assert!(!check(&world, without, "with") && check(&world, without, "without"));
+        assert!(check(&world, with, "added") && check(&world, with, "changed"));
+        // Nothing ever had a `Shadow`, so nothing has one.
+        assert!(filter(&world, &r, &none, with, "without", "Shadow").unwrap());
+
+        // As in a system that ran after the spawn: not added nor changed since.
+        let after_spawn = world.change_tick();
+        world.increment_change_tick();
+        world.last_change_tick_scope(after_spawn, |world| {
+            assert!(!check(world, with, "added") && !check(world, with, "changed"));
+        });
+        world.get_mut::<Label>(with).unwrap().0 = "b".into();
+        world.last_change_tick_scope(after_spawn, |world| {
+            assert!(!check(world, with, "added") && check(world, with, "changed"));
+        });
+        assert!(filter(&world, &r, &none, with, "sometimes", "Label").is_err());
     }
 
     mod other {

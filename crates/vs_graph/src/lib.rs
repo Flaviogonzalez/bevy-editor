@@ -19,7 +19,7 @@ pub mod rust;
 
 pub use lower::{Lowered, Problem, Severity, lower};
 pub use vs_nodes;
-pub use graph::{ComponentDef, Graph, Link, Node, NodeId, PinRef, Side, Value, Variable};
+pub use graph::{ComponentDef, FilterOp, QueryFilter, Graph, Link, Node, NodeId, PinRef, Side, Value, Variable};
 pub use library::{NodeDef, PinDef, PinType};
 
 const MARKER: &str = "bevy-visual-script";
@@ -203,6 +203,40 @@ mod tests {
         g.add_component_def(ComponentDef { name: "NoSuchThing".into(), fields: Vec::new() }, 0.0, 500.0);
         assert!(compile(&g).problems.iter().all(|p| p.node != Some(copy)));
         assert_eq!(load_from_str(&save_to_string(&g)).unwrap(), g);
+    }
+
+    #[test]
+    fn each_block_lists_the_nodes_it_was_lowered_from() {
+        let mut g = Graph::default();
+        let start = g.add_node("event.start", None, 0.0, 0.0);
+        let hello = g.add_node("action.print", None, 0.0, 0.0);
+        let update = g.add_node("event.update", None, 0.0, 0.0);
+        let branch = g.add_node("flow.branch", None, 0.0, 0.0);
+        let tick = g.add_node("action.print", None, 0.0, 0.0);
+        let elapsed = g.add_node("time.elapsed", None, 0.0, 0.0);
+        let double = g.add_node("math.add", None, 0.0, 0.0);
+        let loose = g.add_node("math.add", None, 0.0, 0.0);
+        assert!(g.link(PinRef::new(start, "then"), PinRef::new(hello, "in")));
+        assert!(g.link(PinRef::new(update, "then"), PinRef::new(branch, "in")));
+        assert!(g.link(PinRef::new(branch, "true"), PinRef::new(tick, "in")));
+        // `elapsed` feeds both events: straight into the first, through `double` into the second.
+        assert!(g.link(PinRef::new(elapsed, "seconds"), PinRef::new(hello, "value")));
+        assert!(g.link(PinRef::new(elapsed, "seconds"), PinRef::new(double, "a")));
+        assert!(g.link(PinRef::new(double, "result"), PinRef::new(tick, "value")));
+
+        let out = lower(&g);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        let nodes = |event| {
+            let block = out.module.blocks.iter().find(|b| b.node == event).unwrap();
+            block.nodes.iter().copied().collect::<Vec<_>>()
+        };
+        let sorted = |mut ids: Vec<NodeId>| {
+            ids.sort();
+            ids
+        };
+        assert_eq!(nodes(start), sorted(vec![start, hello, elapsed]));
+        assert_eq!(nodes(update), sorted(vec![update, branch, tick, elapsed, double]));
+        assert!(out.module.blocks.iter().all(|b| !b.nodes.contains(&loose)));
     }
 
     #[test]

@@ -14,7 +14,8 @@
 //! at the top. Every component is re-exported at the root, so the game names `scripts::Jump`
 //! wherever `jump.lua` is, and its type name must be unique in the project.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Range;
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
@@ -24,6 +25,7 @@ use crate::access::{self, Filter, Resource, Subject};
 use crate::ir::{Action, Declared, Device, EffectOp, Event, Intrinsic, Let, Lit, Module, Operand, Step};
 use crate::library::PinType;
 use crate::lower::snake_case;
+use crate::NodeId;
 
 /// One script: the asset path its `.lua` file has (`scripts/spinner.lua`) and its IR.
 pub struct Script<'a> {
@@ -133,8 +135,117 @@ impl Namer {
 }
 
 fn format_file(tokens: TokenStream) -> String {
+    traced_file(tokens).code
+}
+
+/// Generated code and the lines each graph node wrote: by node, ranges of 0-based line numbers
+/// in `code`. A node can own several ranges, such as a data node read by two steps.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Traced {
+    pub code: String,
+    pub lines: BTreeMap<NodeId, Vec<Range<usize>>>,
+}
+
+/// Opens the lines written from the listed nodes. It's placed before a step's statements, a
+/// system's function, or a declared component, and removed once the file is formatted.
+const NODE_MARK: &str = "__vs_node!(";
+/// Closes the lines of the marker before it, where the next lines belong to no node.
+const END_MARK: &str = "__vs_end!(";
+
+/// `__vs_node!(n4_7);`: the lines after it, up to the next marker or a line indented less, come
+/// from nodes 4 and 7. Marking in tokens and reading the lines back after formatting is what
+/// lets the code stay formatted by prettyplease, which keeps no spans or comments. A long
+/// marker gets wrapped onto several lines; [`traced_file`] reads it back whole.
+fn mark(nodes: &[NodeId]) -> TokenStream {
+    let ids: Vec<String> = nodes.iter().map(|n| n.to_string()).collect();
+    let ident = format_ident!("n{}", ids.join("_"));
+    quote! { __vs_node!(#ident); }
+}
+
+/// The nodes of a marker's argument, `n4_7)`.
+fn marked_nodes(arg: &str) -> Vec<NodeId> {
+    arg.trim_end_matches(");").trim_start_matches('n').split('_').filter_map(|id| id.parse().ok()).collect()
+}
+
+fn end_mark() -> TokenStream {
+    quote! { __vs_end!(); }
+}
+
+/// Formats a file, then takes its markers out, recording which lines each one covered. A
+/// marker covers the lines after it until the next marker, an end marker, or a line indented
+/// less than the marker (the `}` that closes its block). Blank lines a removed marker leaves
+/// next to another are dropped, so the code reads as if it never had them.
+fn traced_file(tokens: TokenStream) -> Traced {
     let file: syn::File = syn::parse2(tokens).expect("generated code parses");
-    prettyplease::unparse(&file)
+    let raw = prettyplease::unparse(&file);
+    let mut code: Vec<&str> = Vec::new();
+    let mut lines: BTreeMap<NodeId, Vec<Range<usize>>> = BTreeMap::new();
+    // The open marker: its nodes, its indentation, and the first line it covers.
+    let mut open: Option<(Vec<NodeId>, usize, usize)> = None;
+    let mut close = |open: &mut Option<(Vec<NodeId>, usize, usize)>, code: &[&str]| {
+        let Some((nodes, _, start)) = open.take() else { return };
+        let blank = |i: usize| code[i].trim().is_empty();
+        let (mut start, mut end) = (start, code.len());
+        while start < end && blank(start) {
+            start += 1;
+        }
+        while end > start && blank(end - 1) {
+            end -= 1;
+        }
+        if start < end {
+            for node in nodes {
+                lines.entry(node).or_default().push(start..end);
+            }
+        }
+    };
+    // A marker prettyplease wrapped onto several lines, read until its `);`: its indentation and
+    // its text so far.
+    let mut wrapped: Option<(usize, String)> = None;
+    for line in raw.lines() {
+        let text = line.trim_start();
+        let indent = line.len() - text.len();
+        if let Some((at, mut arg)) = wrapped.take() {
+            arg.push_str(text.trim());
+            if arg.ends_with(");") {
+                open = Some((marked_nodes(&arg), at, code.len()));
+            } else {
+                wrapped = Some((at, arg));
+            }
+            continue;
+        }
+        if let Some(ids) = text.strip_prefix(NODE_MARK) {
+            close(&mut open, &code);
+            if ids.trim_end().ends_with(");") {
+                open = Some((marked_nodes(ids), indent, code.len()));
+            } else {
+                wrapped = Some((indent, ids.trim().to_string()));
+            }
+            continue;
+        }
+        if text.starts_with(END_MARK) {
+            close(&mut open, &code);
+            continue;
+        }
+        if open.as_ref().is_some_and(|(_, at, _)| !text.is_empty() && indent < *at) {
+            close(&mut open, &code);
+        }
+        if text.is_empty() && code.last().is_none_or(|last| last.trim().is_empty()) {
+            continue;
+        }
+        code.push(line);
+    }
+    close(&mut open, &code);
+    let mut code = code.join("\n");
+    code.push('\n');
+    Traced { code, lines }
+}
+
+/// The Rust file `Build` writes for one script, as [`emit_export`] writes it, with the lines each
+/// node of the script wrote.
+pub fn emit_script_traced(script: &Script) -> Traced {
+    let declared = declared_names(std::slice::from_ref(script));
+    let names = names(&script.path);
+    traced_file(script_items(script, &names, true, &imports(script, &declared)))
 }
 
 /// A folder of scripts: a module whose plugin adds the plugins of the scripts and folders in it.
@@ -240,13 +351,19 @@ fn declared_names(scripts: &[Script]) -> BTreeSet<String> {
 /// from a script in a folder.
 fn imports(script: &Script, declared: &BTreeSet<String>) -> TokenStream {
     let up = "super::".repeat(folders(&script.path).len() + 1);
+    // The components its nodes use, then the ones only its queries' filters name.
+    let filtered = script.ir.blocks.iter().flat_map(|b| b.filters.iter().map(|f| &f.component.name));
+    let mut seen = BTreeSet::new();
     let uses = script
         .ir
         .components
         .iter()
-        .filter(|c| declared.contains(&c.name) && !script.ir.declares.iter().any(|d| d.name == c.name))
-        .map(|c| {
-            let path: syn::Path = syn::parse_str(&format!("{up}{}", c.name)).expect("component names parse");
+        .map(|c| &c.name)
+        .chain(filtered)
+        .filter(|name| declared.contains(*name) && !script.ir.declares.iter().any(|d| d.name == **name))
+        .filter(|name| seen.insert(name.as_str()))
+        .map(|name| {
+            let path: syn::Path = syn::parse_str(&format!("{up}{name}")).expect("component names parse");
             quote! { use #path; }
         });
     quote! { #(#uses)* }
@@ -523,7 +640,14 @@ fn script_items(script: &Script, names: &Names, systems: bool, imports: &TokenSt
     let state_fields: Vec<String> = ir.states.iter().map(|s| fields.take(s)).collect();
     // A script that only declares components has none of its own.
     let own = (!ir.declares_only()).then(|| component(ir, &ty, &var_fields, &state_fields));
-    let declared: Vec<TokenStream> = ir.declares.iter().map(declared).collect();
+    let declared: Vec<TokenStream> = ir
+        .declares
+        .iter()
+        .map(|d| {
+            let (open, item, close) = (mark(&[d.node]), declared(d), end_mark());
+            quote! { #open #item #close }
+        })
+        .collect();
     let component = quote! { #own #(#declared)* };
     if !systems {
         return quote! {
@@ -569,7 +693,10 @@ fn script_items(script: &Script, names: &Names, systems: bool, imports: &TokenSt
     for system in access::systems(ir, names) {
         let block = &ir.blocks[system.block];
         let fn_name = format_ident!("{}", system.name);
-        system_fns.push(cx.system(&fn_name, &system, &block.body));
+        // The event's lines: the function's signature and its loop, up to its first step.
+        let event = mark(&[block.node]);
+        let f = cx.system(&fn_name, &system, &block.body);
+        system_fns.push(quote! { #event #f });
         schedule.push(match &block.event {
             Event::Key(key) => {
                 needs_condition = true;
@@ -701,10 +828,21 @@ impl Cx<'_> {
             1 => (items.remove(0), patterns.remove(0)),
             _ => (quote!((#(#items),*)), quote!((#(#patterns),*))),
         };
-        let query = match system.filter {
-            Some(Filter::Added) => quote!(Query<#item, Added<#ty>>),
-            Some(Filter::With) => quote!(Query<#item, With<#ty>>),
-            None => quote!(Query<#item>),
+        let own = match system.filter {
+            Some(Filter::Added) => Some(quote!(Added<#ty>)),
+            Some(Filter::With) => Some(quote!(With<#ty>)),
+            None => None,
+        };
+        let mut filters: Vec<TokenStream> = own.into_iter().collect();
+        for f in &system.filters {
+            let op = format_ident!("{}", f.op.rust());
+            let path: syn::Path = syn::parse_str(&f.component.rust_path).expect("component paths parse");
+            filters.push(quote!(#op<#path>));
+        }
+        let query = match filters.len() {
+            0 => quote!(Query<#item>),
+            1 => quote!(Query<#item, #(#filters)*>),
+            _ => quote!(Query<#item, (#(#filters),*)>),
         };
         let mutable = system.mutable();
 
@@ -743,6 +881,9 @@ impl Cx<'_> {
     fn steps(&self, steps: &[Step], env: &mut Env, names: &mut Namer) -> TokenStream {
         let mut out = TokenStream::new();
         for step in steps {
+            if !step.nodes.is_empty() {
+                out.extend(mark(&step.nodes));
+            }
             for l in &step.lets {
                 if let Some(binding) = self.bind(l, env, names) {
                     out.extend(binding);
@@ -1143,6 +1284,54 @@ mod tests {
         assert_eq!(quote!(#e).to_string(), "(x + y) * 2.0");
         let s = inline("math.min", vec![lit_expr(&Lit::Number(2.0), false), syn::parse_quote!(x)]);
         assert!(quote!(#s).to_string().starts_with("2.0_f32 . min"), "{}", quote!(#s));
+    }
+
+    #[test]
+    fn each_node_owns_the_lines_it_writes() {
+        use crate::PinRef;
+        let mut g = crate::starter();
+        let id = |g: &crate::Graph, kind: &str| g.nodes.iter().find(|n| n.kind == kind).unwrap().id;
+        let (update, rotate, mul) = (id(&g, "event.update"), id(&g, "transform.rotate"), id(&g, "math.mul"));
+        let speed = id(&g, "var.get");
+        // A Branch on the elapsed time, with a Print inside it.
+        let branch = g.add_node("flow.branch", None, 0.0, 300.0);
+        let print = g.add_node("action.print", None, 200.0, 300.0);
+        let gt = g.add_node("logic.gt", None, 0.0, 400.0);
+        let elapsed = g.add_node("time.elapsed", None, 0.0, 500.0);
+        assert!(g.link(PinRef::new(rotate, "then"), PinRef::new(branch, "in")));
+        assert!(g.link(PinRef::new(branch, "true"), PinRef::new(print, "in")));
+        assert!(g.link(PinRef::new(elapsed, "seconds"), PinRef::new(gt, "a")));
+        assert!(g.link(PinRef::new(gt, "result"), PinRef::new(branch, "condition")));
+        declare(&mut g, "Health", &[("max", crate::Value::Number(100.0))]);
+        let card = g.nodes.last().unwrap().id;
+
+        let lowered = crate::lower(&g);
+        assert!(lowered.problems.is_empty(), "{:?}", lowered.problems);
+        let script = Script { path: "scripts/spinner.lua".into(), ir: &lowered.module };
+        let traced = emit_script_traced(&script);
+        // The markers are gone, and the code is the file `Build` writes.
+        assert!(!traced.code.contains("__vs_"), "{}", traced.code);
+        // A marker naming many nodes stays on one line, so it's removed whole.
+        let many: Vec<NodeId> = (1000..1040).collect();
+        let long = traced_file(quote! { fn f() { __vs_node!(x); let a = 1; } }.into_iter().chain(mark(&many)).collect());
+        assert!(!long.code.contains("__vs_") && !long.code.contains("1039"), "{}", long.code);
+        let exported = emit_export(&[Script { path: "scripts/spinner.lua".into(), ir: &lowered.module }]);
+        assert_eq!(exported.iter().find(|(f, _)| f == "scripts/spinner.rs").unwrap().1, traced.code);
+
+        let lines: Vec<&str> = traced.code.lines().collect();
+        let text = |node: NodeId| -> String {
+            traced.lines[&node].iter().flat_map(|r| lines[r.clone()].iter().copied()).collect::<Vec<_>>().join("\n")
+        };
+        assert!(text(update).contains("fn update_spinner(") && text(update).contains("for "), "{}", text(update));
+        assert!(text(rotate).contains("transform.rotation"), "{}", text(rotate));
+        // Data nodes share their statement's lines.
+        assert_eq!(traced.lines[&mul], traced.lines[&rotate]);
+        assert_eq!(traced.lines[&speed], traced.lines[&rotate]);
+        // The Branch owns its `if` line, not the Print inside it.
+        assert!(text(branch).trim_start().starts_with("if ") && !text(branch).contains("info!"), "{}", text(branch));
+        assert!(text(print).contains("info!") && !text(print).contains("if "), "{}", text(print));
+        assert_eq!(traced.lines[&elapsed], traced.lines[&branch]);
+        assert!(text(card).contains("pub struct Health") && !text(card).contains("Plugin"), "{}", text(card));
     }
 
     fn declare(g: &mut crate::Graph, name: &str, fields: &[(&str, crate::Value)]) {
