@@ -210,6 +210,59 @@ recursos), no en cada nodo.
   sale (`Res<Time>`). Alternativa más grande, para después: sacar el nodo y que la cabecera
   del marco sea la entrada, con el pin de ejecución saliendo de ella.
 
+- **Queries editables: el filtro como una barra de filtros al estilo de reui.** Propuesta
+  previa: los datos de la query (`&T`, `&mut T`, `Entity`) y los recursos se siguen deduciendo
+  de los nodos; el filtro (sobre qué entidades actúa) pasa a ser explícito, guardado en el nodo
+  de entrada, y los scripts viejos reciben como filtro explícito el `With`/`Added` de su
+  componente propio. **Idea del usuario para la interfaz:** no un menú de opciones sino una
+  barra con las operaciones ya configuradas, como el componente Filters de reui: cada término
+  es una pastilla `[With ▾] [LightBehavior ▾] ×` con desplegables para operador y componente,
+  y un `+ Add filter` que abre un buscador de componentes. Las pastillas se combinan con AND,
+  que es la tupla de filtros de Bevy. Encaja con más cosas después: una pastilla con varios
+  componentes ("With any of A, B") es `Or<(With<A>, With<B>)>`, y los datos deducidos se
+  pueden mostrar en la misma barra como pastillas grises sin ×.
+
+  **Precisiones del usuario:**
+  - Los datos también se editan, como un formulario: aparecen ya llenos con lo que piden los
+    nodos, pero se pueden cambiar cuando quieras (no son de solo lectura).
+  - La barra es como un command box: la barra es el conjunto de operaciones (la query) y la
+    lista que se despliega debajo son los resultados de la query, de solo lectura.
+  - Un botón grande a la izquierda de los filtros, con un chevron a la derecha, para ejecutarla.
+    La query es importante para el system, así que el botón no puede ser chico.
+  **Confirmado:** los resultados son las entidades que coinciden. Eso pide el juego corriendo;
+  Bevy Remote Protocol tiene una consulta (`world.query`) que recibe justamente componentes,
+  `with` y `without`, así que la vista previa podría responderla.
+
+  **Lo que complica la vista previa.** Hoy la vista previa no tiene queries: `preview::register`
+  pega el script a toda entidad con el componente propio, y Lua corre todos los eventos por
+  entidad. Un filtro que no sea `With<propio>` (un `Without<Enemy>`, un `Changed<T>`, o una
+  query sin el componente propio) haría que la vista previa y el build hagan cosas distintas.
+  Para que coincidan, Lua tiene que chequear el filtro de cada system por entidad antes de
+  correr su evento (`With`/`Without` por reflexión; `Added`/`Changed` con los ticks de cambio),
+  y más adelante pegar los scripts según las queries y no según el componente propio.
+
+  **Etapa 1, primer paso (hecho).** El nodo de entrada guarda filtros (`filters` en el JSON,
+  vacío por defecto, así que los scripts viejos no cambian). Rust los escribe en el tipo de la
+  query; Lua envuelve el bloque en `if vs.filter(entity, "without", "Enemy") then`, y la vista
+  previa lo resuelve por reflexión y con los ticks de cambio. Un `Without` sobre algo que la
+  entidad siempre tiene es error, y un `Without` hace que dos systems no sean ambiguos (la misma
+  regla de Bevy). El Inspector tiene solo el trigger: un botón grande "Query ›" con la query.
+  Abre el commandbox (como el Command de shadcn/Base UI), flotante sobre el editor: arriba la
+  barra de operaciones (pastillas de datos, el filtro propio, `[With ▾][Componente ▾] ×`,
+  `+ Filter`) con el botón grande "Query ›" a la derecha que la corre; abajo la lista de
+  entidades, de solo lectura, que por ahora explica que hace falta la vista previa (etapa 2).
+
+  Falta, en este orden posible:
+  - Pastillas de datos editables (hoy son de solo lectura, deducidas de los nodos).
+  - El filtro sobre el componente propio queda fijo hasta que sea un componente común.
+  - El catálogo solo lista componentes con campos que un pin lleva: faltan los marcadores
+    (componentes vacíos) y `Visibility`, justo lo que más se filtra.
+  - El menú de componentes no tiene búsqueda al tipear (reusar el patrón del menú de nodos).
+  - La barra en la cabecera del marco, además del Inspector.
+  - El test diferencial no cubre filtros todavía.
+  - `Changed<Transform>` en la vista previa: Lua escribe el `Transform` al final del script,
+    así que un system posterior del mismo script lo ve cambiado un frame después que en Rust.
+
 ## Limitaciones conocidas
 
 - **Ambigüedades con pestañas sin guardar.** El análisis de ambigüedades lee los otros scripts del

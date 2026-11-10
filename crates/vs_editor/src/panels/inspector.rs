@@ -1,9 +1,7 @@
 //! The right panel, what you edit: the selected node, what it does, its name and its pins.
 
 
-use gpui_kit::{
-    Context, Div, FontWeight, IntoElement, div, prelude::*, px,
-};
+use gpui_kit::{Context, Div, FontWeight, IntoElement, div, prelude::*, px};
 use vs_graph::{Compiled, library};
 
 use crate::editor::{EditTarget, Editor};
@@ -30,6 +28,8 @@ impl Editor {
             return hint("Unknown node".into());
         };
         let pins = self.doc.graph.pins_of(node);
+        let system = self.systems(compiled).remove(&id);
+        let query = system.as_ref().map(|s| self.query_trigger(id, s, cx));
         let pin_row = |p: &vs_graph::library::PinDef| {
             div()
                 .h(px(24.0))
@@ -41,7 +41,6 @@ impl Editor {
                 .child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(p.ty.label()))
         };
         let editing = self.editing.as_ref().filter(|e| e.target == EditTarget::NodeName(id));
-        let system = self.systems(compiled).remove(&id);
         let name = match (editing, &node.name, &system) {
             (Some(e), _, _) => format!("{}|", e.buffer),
             (None, Some(name), _) => name.clone(),
@@ -88,6 +87,8 @@ impl Editor {
                     }),
                 )))
             })
+            // An event's system queries entities: the button that opens its commandbox.
+            .children(query)
             // An event compiles to a system: its signature, as the exported Rust has it.
             .when_some(system, |d, system| {
                 let param = |text: String| div().pl_4().child(format!("{text},"));

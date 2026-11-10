@@ -9,6 +9,7 @@ mod bottom;
 mod dialog;
 mod explorer;
 mod inspector;
+mod query;
 mod tabs;
 mod toolbar;
 
@@ -21,6 +22,8 @@ pub enum Dialog {
     NewScript { buffer: String, folder: String },
     /// A folder in `parent`.
     NewFolder { buffer: String, parent: String },
+    /// The query commandbox of an event node; `ran` once its Query button was pressed.
+    Query { node: vs_graph::NodeId, ran: bool },
 }
 
 /// The tabs of the panel under the canvas.

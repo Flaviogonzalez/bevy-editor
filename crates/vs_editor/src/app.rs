@@ -80,7 +80,7 @@ impl Render for Editor {
                         ),
                 ),
             )
-            .when(self.chrome.dialog.is_some(), |d| d.child(self.dialog_element(cx)))
+            .when(self.chrome.dialog.is_some(), |d| d.child(self.dialog_element(&compiled, cx)))
             .child(
                 div()
                     .h(px(24.0))
