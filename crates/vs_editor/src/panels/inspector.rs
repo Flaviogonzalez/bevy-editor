@@ -41,10 +41,13 @@ impl Editor {
                 .child(div().text_size(px(11.0)).text_color(theme::dim(cx)).child(p.ty.label()))
         };
         let editing = self.editing.as_ref().filter(|e| e.target == EditTarget::NodeName(id));
-        let name = match (editing, &node.name) {
-            (Some(e), _) => format!("{}|", e.buffer),
-            (None, Some(name)) => name.clone(),
-            (None, None) => "(unnamed)".into(),
+        let system = self.systems(compiled).remove(&id);
+        let name = match (editing, &node.name, &system) {
+            (Some(e), _, _) => format!("{}|", e.buffer),
+            (None, Some(name), _) => name.clone(),
+            // An unnamed event still names its system, after the event and the script.
+            (None, None, Some(system)) => format!("(automatic: {})", system.name),
+            (None, None, None) => "(unnamed)".into(),
         };
         let declared = node.component.as_ref().map(|c| &c.name).or(node.copy_of.as_ref());
         let title = match node.var.as_ref().or(node.field.as_ref()).or(declared) {
@@ -86,7 +89,7 @@ impl Editor {
                 )))
             })
             // An event compiles to a system: its signature, as the exported Rust has it.
-            .when_some(self.systems(compiled).remove(&id), |d, system| {
+            .when_some(system, |d, system| {
                 let param = |text: String| div().pl_4().child(format!("{text},"));
                 d.child(
                     group("System", None, cx)

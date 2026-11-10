@@ -1,6 +1,6 @@
 //! Node geometry in graph units, shared by drawing and hit testing so both always agree.
 
-use vs_graph::{ComponentDef, Graph, Node, NodeId, PinDef, PinRef, PinType, Side, Value, Variable, library};
+use vs_graph::{ComponentDef, Graph, Node, NodeId, PinDef, PinRef, PinType, Side, Value, Variable};
 
 pub const NODE_W: f32 = 210.0;
 pub const HEADER_H: f32 = 30.0;
@@ -16,8 +16,6 @@ pub const FIELD_W: f32 = 64.0;
 pub const FIELD_H: f32 = 18.0;
 /// A component card is wider than a node: each row holds a name, a value and a type.
 pub const CARD_W: f32 = 270.0;
-/// The footer of an event node, where the query of the system it compiles to is shown.
-pub const SYSTEM_H: f32 = 36.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct V2 {
@@ -118,8 +116,6 @@ pub struct NodeLayout {
     /// A read-only copy: of its parts, only [`CardPart::Source`] takes clicks, so pressing
     /// anywhere else on it moves it like any node.
     pub readonly: bool,
-    /// An event node's footer, which shows its system's query. It takes clicks like the body.
-    pub system: Option<Rect>,
 }
 
 /// A clickable part of a component card. Field indices are positions in its `fields`.
@@ -180,10 +176,7 @@ pub fn layout(graph: &Graph, node: &Node) -> NodeLayout {
     }
     let pins = graph.pins_of(node);
     let rows = pins.inputs.len().max(pins.outputs.len()).max(1);
-    let body = HEADER_H + PAD_TOP + rows as f32 * ROW_H + PAD_BOTTOM;
-    let event = library::find(&node.kind).is_some_and(|d| d.is_event());
-    let system = event.then(|| Rect::new(node.x, node.y + body, NODE_W, SYSTEM_H));
-    let h = body + if event { SYSTEM_H } else { 0.0 };
+    let h = HEADER_H + PAD_TOP + rows as f32 * ROW_H + PAD_BOTTOM;
     let rect = Rect::new(node.x, node.y, NODE_W, h);
     let row_y = |i: usize| node.y + HEADER_H + PAD_TOP + i as f32 * ROW_H + ROW_H * 0.5;
 
@@ -217,7 +210,7 @@ pub fn layout(graph: &Graph, node: &Node) -> NodeLayout {
         })
         .collect();
 
-    NodeLayout { id: node.id, rect, inputs, outputs, fields, parts: Vec::new(), readonly: false, system }
+    NodeLayout { id: node.id, rect, inputs, outputs, fields, parts: Vec::new(), readonly: false }
 }
 
 /// A component card: the name, a row per field (name, value, type, remove) and a row to add a
@@ -249,7 +242,7 @@ fn card_layout(node: &Node, def: &ComponentDef, readonly: bool) -> NodeLayout {
     if !readonly {
         parts.push((CardPart::AddField, Rect::new(x(10.0), top(def.fields.len() + 1), 90.0, FIELD_H)));
     }
-    NodeLayout { id: node.id, rect, inputs: Vec::new(), outputs: Vec::new(), fields: Vec::new(), parts, readonly, system: None }
+    NodeLayout { id: node.id, rect, inputs: Vec::new(), outputs: Vec::new(), fields: Vec::new(), parts, readonly }
 }
 
 #[derive(Clone, Debug, PartialEq)]

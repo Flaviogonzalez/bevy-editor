@@ -86,6 +86,13 @@ pub fn category(category: &str) -> Rgba {
     })
 }
 
+/// The color of a script's `index`th system: its group's frame and the stripe on its nodes.
+/// After the last one they repeat.
+pub fn system(index: usize) -> Rgba {
+    const COLORS: [u32; 6] = [0x4f9dde, 0xe0a13a, 0x5fbf7a, 0xc77ddb, 0xe0685f, 0x4fc4c4];
+    rgb(COLORS[index % COLORS.len()])
+}
+
 pub fn pin(ty: PinType) -> Rgba {
     rgb(match ty {
         PinType::Exec => 0xe8e8e8,
