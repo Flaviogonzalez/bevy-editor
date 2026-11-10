@@ -11,6 +11,7 @@ use vs_project::Project;
 
 use crate::editor::Editor;
 use crate::panels::BottomTab;
+use crate::workspace::Outline;
 use crate::workspace::tasks::{Outcome, Task, Then};
 
 impl Editor {
@@ -53,28 +54,29 @@ impl Editor {
         }
     }
 
-    /// Reads the systems of the project's scripts other than the open one, for
-    /// [`Editor::ambiguities`]. Call it when the project, the open script or its name changes;
-    /// the other scripts only change on disk when they're open, so that's enough.
+    /// Reads the project's scripts other than the open one: their systems, for
+    /// [`Editor::ambiguities`], and their outlines, for the Explorer. Call it when the project,
+    /// the open script or its name changes; the other scripts only change on disk when they're
+    /// open, so that's enough.
     pub fn scan_systems(&mut self) {
         let own = self.script_name();
-        let Some(project) = &self.workspace.project else {
-            self.workspace.others.clear();
-            return;
-        };
-        self.workspace.others = project
-            .scripts()
-            .into_iter()
-            .filter_map(|path| {
-                let file = project.script_name(&path);
-                if file == own {
-                    return None;
-                }
-                let graph = vs_graph::load_from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
-                let systems = access::systems(&vs_graph::lower(&graph).module, &vs_graph::rust::names(&file));
-                Some((file, systems))
-            })
-            .collect();
+        self.workspace.others.clear();
+        self.workspace.outlines.clear();
+        let Some(project) = &self.workspace.project else { return };
+        for path in project.scripts() {
+            let file = project.script_name(&path);
+            if file == own {
+                continue;
+            }
+            let Some(graph) = std::fs::read_to_string(&path).ok().and_then(|text| vs_graph::load_from_str(&text).ok())
+            else {
+                continue;
+            };
+            let module = vs_graph::lower(&graph).module;
+            let systems = access::systems(&module, &vs_graph::rust::names(&file));
+            self.workspace.outlines.insert(path, Outline::of(&graph, &module, &file));
+            self.workspace.others.push((file, systems));
+        }
     }
 
     /// A warning on each event whose system Bevy's ambiguity detection would report together

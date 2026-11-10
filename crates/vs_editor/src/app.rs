@@ -48,7 +48,7 @@ impl Render for Editor {
                                 .size(px(272.0))
                                 .size_range(px(200.0)..px(480.0))
                                 .fixed()
-                                .child(self.explorer(cx)),
+                                .child(self.explorer(&compiled, cx)),
                         )
                         .child(
                             resizable_panel().child(

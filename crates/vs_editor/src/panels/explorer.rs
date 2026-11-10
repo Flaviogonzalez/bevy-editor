@@ -1,6 +1,6 @@
-//! The left panel, what you navigate and declare: the open project (its scripts, in a tree of
-//! folders that each become a plugin, and its catalog of components), then the graph's
-//! variables.
+//! The left panel, what you navigate and declare: the open project (its plugins, in a tree of
+//! folders that each become a plugin too, each plugin unfolding into its systems, components and
+//! resources; and its catalog of components), then the graph's variables.
 
 
 use std::path::{Path, PathBuf};
@@ -13,27 +13,28 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::component::{Icon, IconName};
-use vs_graph::{PinType, Value};
+use vs_graph::{Compiled, NodeId, PinType, Value};
 
 use crate::actions;
 use crate::editor::{EditTarget, Editor};
 use crate::theme;
 use crate::panels::dialog::folder_plugin;
-use crate::ui::{dispatch, field, group, panel, panel_title};
+use crate::ui::{MONO, dispatch, field, group, panel, panel_title};
+use crate::workspace::Outline;
 use crate::canvas::layout::{self, V2};
 
 impl Editor {
     /// The left panel: what you navigate and declare. The open project (its scripts and its
     /// catalog of components), then the graph's variables.
-    pub(crate) fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn explorer(&self, compiled: &Compiled, cx: &mut Context<Self>) -> impl IntoElement {
         panel("explorer", cx)
             .border_r_1()
             .child(panel_title("Explorer", cx))
-            .child(self.project_group(cx))
+            .child(self.project_group(compiled, cx))
             .child(self.variables_group(cx))
     }
 
-    fn project_group(&self, cx: &mut Context<Self>) -> Div {
+    fn project_group(&self, compiled: &Compiled, cx: &mut Context<Self>) -> Div {
         let Some(project) = self.workspace.project.as_ref() else {
             return group("Project", None, cx)
                 .child(
@@ -66,8 +67,9 @@ impl Editor {
                         ),
                 );
         };
+        let current = Outline::of(&self.doc.graph, &compiled.module, &self.script_name());
         let mut rows = Vec::new();
-        self.tree_rows(&project.scripts_dir(), "", 0, &mut rows, cx);
+        self.tree_rows(&project.scripts_dir(), "", 0, &current, &mut rows, cx);
         let new_script = self.add_menu_button("script-add".into(), "", "New script or folder", cx);
         let catalog = vs_graph::components::project().len();
         group(format!("Project · {}", project.name), Some(new_script), cx)
@@ -246,7 +248,19 @@ impl Editor {
     /// The rows for the folder at `dir` (`rel` in the scripts folder, `""` for the top), at
     /// `depth`: each folder, with the plugin it becomes and, unless folded, what's in it; then
     /// each script.
-    fn tree_rows(&self, dir: &Path, rel: &str, depth: usize, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
+    ///
+    /// Each script is listed as the plugin it becomes, and unfolds into what that plugin holds.
+    /// `current` is the open script's outline, read from the graph on screen; the others' come
+    /// from disk (see [`Editor::scan_systems`]).
+    fn tree_rows(
+        &self,
+        dir: &Path,
+        rel: &str,
+        depth: usize,
+        current: &Outline,
+        rows: &mut Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) {
         let indent = px(8.0 + depth as f32 * 14.0);
         let (folders, files) = entries(dir);
         for folder in folders {
@@ -288,33 +302,139 @@ impl Editor {
                 }));
             rows.push(row.into_any_element());
             if open {
-                self.tree_rows(&folder, &path, depth + 1, rows, cx);
+                self.tree_rows(&folder, &path, depth + 1, current, rows, cx);
             }
         }
         for path in files {
             let open = self.doc.path.as_ref() == Some(&path);
+            let outline = if open { Some(current) } else { self.workspace.outlines.get(&path) };
             let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            // The open plugin starts unfolded and the rest folded; `collapsed` holds the ones
+            // toggled away from that.
+            let key = format!("plugin:{}", path.display());
+            let expanded = open != self.chrome.collapsed.contains(&key);
+            let chevron = div()
+                .id(SharedString::from(format!("plugin-fold-{}", path.display())))
+                .flex()
+                .child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    // Folding shouldn't also open the plugin.
+                    cx.stop_propagation();
+                    if !this.chrome.collapsed.remove(&key) {
+                        this.chrome.collapsed.insert(key.clone());
+                    }
+                    cx.notify();
+                }));
+            let to_open = path.clone();
             let row = div()
-                .id(SharedString::from(format!("script-{}", path.display())))
+                .id(SharedString::from(format!("plugin-{}", path.display())))
                 .h(px(26.0))
-                // Lined up with the folder names, past the chevron.
-                .pl(indent + px(if depth == 0 { 0.0 } else { 18.0 }))
-                .pr_2()
+                .pl(indent)
+                .pr_1()
                 .flex()
                 .items_center()
-                .gap_2()
+                .gap_1p5()
                 .rounded_md()
                 .text_color(if open { theme::text(cx) } else { theme::dim(cx) })
                 .when(open, |d| d.bg(theme::highlight(cx)))
                 .hover(|s| s.bg(theme::button_hover(cx)).text_color(theme::text(cx)))
                 .cursor_pointer()
-                .child(Icon::new(IconName::FileText).small())
-                .child(name)
+                .child(chevron)
+                .child(Icon::new(IconName::Network).small())
+                .child(div().text_color(theme::text(cx)).child(name))
+                .when_some(outline, |d, outline| {
+                    d.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(11.0))
+                            .child(outline.plugin.clone()),
+                    )
+                })
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_path(path.clone(), window);
+                    this.open_path(to_open.clone(), window);
                     cx.notify();
                 }));
             rows.push(row.into_any_element());
+            if expanded && let Some(outline) = outline {
+                self.outline_rows(&path, outline, depth + 1, rows, cx);
+            }
+        }
+    }
+
+    /// What a plugin holds, under its row: a heading per kind of Bevy piece and a row per piece.
+    /// Pressing a piece opens its plugin, if it isn't the open one, and centers the canvas on the
+    /// node it comes from: a system's event, a component's card.
+    fn outline_rows(&self, path: &Path, outline: &Outline, depth: usize, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
+        let heading = |label: &str, count: usize, cx: &mut Context<Self>| {
+            div()
+                .h(px(22.0))
+                .pl(px(8.0 + depth as f32 * 14.0 + 18.0))
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .text_size(px(11.0))
+                .text_color(theme::dim(cx))
+                .child(Icon::new(IconName::Folder).xsmall())
+                .child(format!("{label} · {count}"))
+                .into_any_element()
+        };
+        let item = |id: String, dot: Option<Hsla>, label: String, note: Option<&str>, target: Option<NodeId>, cx: &mut Context<Self>| {
+            let path = path.to_path_buf();
+            div()
+                .id(SharedString::from(id))
+                .h(px(22.0))
+                .pl(px(8.0 + (depth + 1) as f32 * 14.0 + 18.0))
+                .pr_2()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .rounded_md()
+                .text_size(px(11.5))
+                .text_color(theme::text(cx))
+                .when_some(dot, |d, color| d.child(div().flex_none().w(px(7.0)).h(px(7.0)).rounded_full().bg(color)))
+                .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().font_family(MONO).child(label))
+                .when_some(note, |d, note| {
+                    d.child(div().flex_none().text_size(px(10.5)).text_color(theme::dim(cx)).child(note.to_string()))
+                })
+                .when_some(target, |d, node| {
+                    d.cursor_pointer().hover(|s| s.bg(theme::button_hover(cx))).on_click(cx.listener(move |this, _, window, cx| {
+                        this.show_in_plugin(&path, node, window);
+                        cx.notify();
+                    }))
+                })
+                .into_any_element()
+        };
+        let key = path.display().to_string();
+        rows.push(heading("Systems", outline.systems.len(), cx));
+        for (i, (name, event)) in outline.systems.iter().enumerate() {
+            let dot = Some(Hsla::from(theme::system(i)));
+            rows.push(item(format!("system-{key}-{i}"), dot, name.clone(), None, Some(*event), cx));
+        }
+        rows.push(heading("Components", outline.components.len(), cx));
+        for (i, (name, card)) in outline.components.iter().enumerate() {
+            // The script's own component has no card yet: every system's query filters by it.
+            let note = card.is_none().then_some("in every query");
+            rows.push(item(format!("component-{key}-{i}"), None, name.clone(), note, *card, cx));
+        }
+        rows.push(heading("Resources", 0, cx));
+    }
+
+    /// Opens the plugin at `path` unless it's the open one, then selects `node` and centers the
+    /// canvas on it.
+    fn show_in_plugin(&mut self, path: &Path, node: NodeId, window: &mut Window) {
+        if self.doc.path.as_deref() != Some(path) {
+            self.open_path(path.to_path_buf(), window);
+            if self.doc.path.as_deref() != Some(path) {
+                // It didn't open; `open_path` already said why.
+                return;
+            }
+        }
+        if self.doc.graph.node(node).is_some() {
+            self.doc.focus_node(node, self.canvas.size());
         }
     }
 
