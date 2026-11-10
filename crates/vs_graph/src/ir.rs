@@ -173,6 +173,10 @@ pub struct Step {
     /// Which graph node this comes from, such as `Rotate [4]`. Empty when it continues the step
     /// before it.
     pub comment: String,
+    /// The graph nodes it's written from: its statement node first, then the data nodes its
+    /// `lets` and operands read. A data node is listed by every step that reads it, since each
+    /// evaluates it again. The Rust backend marks the lines each node generates from these.
+    pub nodes: Vec<crate::NodeId>,
     pub lets: Vec<Let>,
     pub action: Action,
 }
@@ -192,6 +196,11 @@ pub struct Block {
     pub comment: String,
     /// The event node it comes from, so the editor can show what its system asks for.
     pub node: crate::NodeId,
+    /// Every graph node this block was lowered from: the event, the statements its exec wires
+    /// reach and the data nodes that feed them. A data node that feeds two events is in both
+    /// blocks, since each evaluates it on its own. Neither backend reads this; the editor uses
+    /// it to show which nodes make up each system.
+    pub nodes: std::collections::BTreeSet<crate::NodeId>,
     /// The event node's name, if it has one. Exported Rust names the event's system after it.
     pub name: Option<String>,
     pub event: Event,
@@ -231,6 +240,8 @@ pub struct Module {
 /// A component declared by a Define Component node.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Declared {
+    /// The Define Component node it comes from.
+    pub node: crate::NodeId,
     pub name: String,
     pub fields: Vec<Variable>,
 }
